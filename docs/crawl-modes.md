@@ -20,7 +20,6 @@
 spec 通过临时文件传递;不下载视频、不使用官方 API key。
 
 ## 2. 模式语义
-
 ### 2.1 feed 链(`fetch-seed`)
 - 游标 `seed=<ISO>` 是链式键:每页返回 `pagination.cursor`,下一页用它。
 - 游标单调向下;feed 全量实测 **524 页 / 9,416 条**(已在 2026-10-07 走到 `SEED-EXHAUSTED`)。
@@ -29,6 +28,9 @@ spec 通过临时文件传递;不下载视频、不使用官方 API key。
   `head_cursor` 标记即停;**只有整轮完成才推进标记**(中断不推进,保证不丢增量窗口)。
   首次运行(无标记)= 只抓 head 一页并写下标记(`HEAD-BOOTSTRAP`)。
   每日增量即:`vpc fetch-seed --head`(无需传参)。
+  ⚠️ `--head` 路径**尚未实跑验证**(实现后一直有别的爬取占用浏览器),首次使用时先冒烟。
+  完整每日例程见 `scripts/daily_incremental.sh`(head 差量 → ingest → 刷新 sitemap → 覆盖率;
+  脚本头部有 cron 示例)。
 
 ### 2.2 搜索扇出(`fetch-search`)
 - 每词最多 20 页(`page=21..25` 站点已在 robots.txt 明确 disallow)。

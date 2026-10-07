@@ -14,20 +14,24 @@ Phase 1 仍在跑(搜索扇出),Phase 2 的**接口层**先落地,避免后面�
   - `EmbeddingSpec{model_id, dim, distance, max_batch, supports}`:声明模态与维度;
     sparse-only 模型 dim 可以为 0。
   - `EmbeddingProvider` Protocol:`dense_text / dense_image / sparse_text`(corpus 与 query 同走)。
-  - `build_embed_text(row)`:规范文本 = `title — description — tag, tag…`(空白归一);
+  - `build_embed_text(row)`:规范文本 = `title — description — tag, tag…`(空白归一,丢弃空 tag);
     入库与查询两侧必须用同一函数。
-  - `HashEmbeddingProvider`:确定性本地 bag-of-words(无网络),用于离线把流水线跑通,
-    **不代表检索质量**。
-- **测试**:`tests/test_embedding.py`(spec 校验、文本拼装、确定性/归一化、稀疏计数、批上限)。
+  - `HashEmbeddingProvider`(dim 768,与列维度一致):确定性本地 bag-of-words(无网络),
+    用于离线把流水线跑通,**不代表检索质量**,只作 dev/测试。
+- **写入路径**:`store.db.embed_pending(conn, provider, limit)` + `vpc embed --model hash --limit N`。
+  向量以 pgvector **文本字面量 + SQL cast** 传递(`%s::vector` / `%s::sparsevec`),
+  因此不需要额外的 python 适配器依赖;选择条件是 `embedding_model IS DISTINCT FROM <model>`,
+  空文本行被过滤,永不重复选中(可增量、可续跑)。
+  已用 hash provider 冒烟 50 行:768 维 + sparse 均写入成功,随后**已清空**(表留给真实模型)。
+- **测试**:`tests/test_embedding.py`(spec 校验、文本拼装、确定性/归一化、稀疏计数、批上限、
+  字面量格式、provider 注册表)。
 
 ## 2. 刻意未做(下一步工单)
 
 1. 真实 provider:DashScope `tongyi-embedding-vision-flash`(需 MPT config 里的 Key,
-   与 MPT 查重门同向量空间);sparse 的 BM25 实现。
-2. DB 写入路径:需要 `pgvector` python 包(注册 vector/sparsevec 适配器)+ `vpc embed`
-   命令(`--model`,按 `embedding_model IS NULL` 增量回填、`max_batch` 分批、失败重试)。
-3. 索引迁移:回填到一定比例后再建 HNSW(cosine)+ `tsv` GIN。
-4. 评测门:召回@k / VLM 采纳率对比现行漏斗(见 handoff §5)。
+   与 MPT 查重门同向量空间);sparse 的 BM25(本地、无需 Key)。
+2. 索引迁移:回填到一定比例后再建 HNSW(cosine)+ `tsv` GIN。
+3. 评测门:召回@k / VLM 采纳率对比现行漏斗(见 handoff §5)。
 
 ## 3. 与 Phase 1 的衔接
 

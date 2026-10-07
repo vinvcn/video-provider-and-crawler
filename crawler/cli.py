@@ -15,7 +15,7 @@ from crawler.pexels_v3 import (
     request_headers,
 )
 from crawler.spool import iter_records, term_slug
-from store import db, migrate, thumbnails
+from store import db, embedding, migrate, thumbnails
 
 
 def _state_file(kind: str) -> Path:
@@ -158,6 +158,17 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_embed(args: argparse.Namespace) -> int:
+    settings = load_settings()
+    provider = embedding.get_provider(args.model)
+    conn = db.connect(settings.db_dsn)
+    try:
+        print(json.dumps(db.embed_pending(conn, provider, limit=args.limit), ensure_ascii=False))
+    finally:
+        conn.close()
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     settings = load_settings()
     conn = db.connect(settings.db_dsn)
@@ -214,6 +225,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--skip-thumbnails", action="store_true")
     p.add_argument("--thumb-limit", type=int, default=2000)
     p.set_defaults(func=cmd_ingest)
+
+    p = sub.add_parser("embed", help="backfill embedding columns (Phase 2 seam)")
+    p.add_argument("--model", default="hash", help="embedding provider (hash = local dev provider)")
+    p.add_argument("--limit", type=int, default=1000)
+    p.set_defaults(func=cmd_embed)
 
     p = sub.add_parser("status", help="library + spool counters")
     p.set_defaults(func=cmd_status)

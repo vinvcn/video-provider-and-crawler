@@ -23,6 +23,9 @@ from typing import Any, Protocol
 DENSE_MODALITIES = ("dense_text", "dense_image")
 KNOWN_MODALITIES = frozenset({"dense_text", "dense_image", "sparse_text"})
 
+# pgvector's sparsevec allows at most 1e9 dimensions; hash ids stay below it.
+SPARSE_DIM = 1_000_000_000
+
 _WS_RE = re.compile(r"\s+")
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
@@ -99,8 +102,8 @@ class HashEmbeddingProvider:
 
     spec: EmbeddingSpec = field(
         default_factory=lambda: EmbeddingSpec(
-            model_id="local-hash-64",
-            dim=64,
+            model_id="local-hash-768",
+            dim=768,
             supports=frozenset({"dense_text", "sparse_text"}),
         )
     )
@@ -128,10 +131,30 @@ class HashEmbeddingProvider:
             counts: dict[int, float] = {}
             for token in self._tokens(text):
                 digest = hashlib.blake2b(token.encode("utf-8"), digest_size=4).digest()
-                token_id = int.from_bytes(digest, "big")
+                token_id = int.from_bytes(digest, "big") % SPARSE_DIM
                 counts[token_id] = counts.get(token_id, 0.0) + 1.0
             out.append(counts)
         return out
 
     def dense_image(self, images: Sequence[bytes]) -> list[list[float]]:
         raise NotImplementedError("hash provider is text-only")
+
+
+def to_vector_literal(values: Sequence[float]) -> str:
+    """pgvector text literal for a dense vector: `[0.1,0.2,...]`."""
+    return "[" + ",".join(f"{value:.6g}" for value in values) + "]"
+
+
+def to_sparsevec_literal(weights: Mapping[int, float], dim: int = SPARSE_DIM) -> str:
+    """pgvector text literal for a sparse vector: `{idx:weight,...}/dim`."""
+    items = ",".join(f"{index}:{weight:.6g}" for index, weight in sorted(weights.items()))
+    return "{" + items + "}/" + str(dim)
+
+
+def get_provider(name: str) -> EmbeddingProvider:
+    """Resolve a provider name; local hash is the offline/dev default."""
+    providers: dict[str, type] = {"hash": HashEmbeddingProvider}
+    try:
+        return providers[name]()  # type: ignore[return-value]
+    except KeyError as exc:
+        raise ValueError(f"unknown embedding provider: {name}") from exc

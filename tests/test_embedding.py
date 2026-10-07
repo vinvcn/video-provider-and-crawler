@@ -2,7 +2,14 @@
 
 import pytest
 
-from store.embedding import EmbeddingSpec, HashEmbeddingProvider, build_embed_text
+from store.embedding import (
+    EmbeddingSpec,
+    HashEmbeddingProvider,
+    build_embed_text,
+    get_provider,
+    to_sparsevec_literal,
+    to_vector_literal,
+)
 
 
 def test_spec_rejects_bad_values():
@@ -58,3 +65,19 @@ def test_hash_provider_enforces_batch_cap():
     provider = HashEmbeddingProvider()
     with pytest.raises(ValueError):
         provider.dense_text(["a"] * (provider.spec.max_batch + 1))
+
+
+def test_vector_literal_format():
+    assert to_vector_literal([0.5, -1.0, 0.0]) == "[0.5,-1,0]"
+
+
+def test_sparsevec_literal_is_sorted_with_dimension():
+    assert to_sparsevec_literal({5: 2.0, 1: 0.5}, dim=100) == "{1:0.5,5:2}/100"
+
+
+def test_get_provider_registry():
+    provider = get_provider("hash")
+    assert provider.spec.model_id.startswith("local-hash")
+    assert provider.spec.dim == 768  # matches the vector(768) column (migration 003)
+    with pytest.raises(ValueError):
+        get_provider("does-not-exist")

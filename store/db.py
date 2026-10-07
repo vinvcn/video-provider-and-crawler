@@ -76,7 +76,6 @@ def upsert_videos(conn: psycopg.Connection, rows: Iterable[dict[str, Any]]) -> i
 
 _CATALOG_TABLES = {"videos": "catalog_videos", "queries": "catalog_queries"}
 
-
 def count_catalog(conn: psycopg.Connection, kind: str) -> int:
     """Row count of the catalog table backing a sitemap kind (videos|queries)."""
     table = _CATALOG_TABLES[kind]
@@ -125,6 +124,76 @@ def upsert_catalog_queries(conn: psycopg.Connection, rows: Iterable[tuple[str, s
         )
     conn.commit()
     return len(batch)
+
+
+_EMBED_SELECT_SQL = """
+SELECT pexels_id, title, description, tags
+FROM stock_videos
+WHERE embedding_model IS DISTINCT FROM %s
+  AND (
+      COALESCE(title, '') <> ''
+      OR COALESCE(description, '') <> ''
+      OR cardinality(tags) > 0
+  )
+ORDER BY pexels_id
+LIMIT %s
+"""
+
+_EMBED_UPDATE_SQL = """
+UPDATE stock_videos SET
+    embed_text = %s,
+    embedding = %s::vector,
+    embedding_model = %s,
+    embedded_at = NOW(),
+    sparse_embedding = %s::sparsevec,
+    sparse_model = %s
+WHERE pexels_id = %s
+"""
+
+
+def embed_pending(
+    conn: psycopg.Connection, provider: Any, limit: int = 1000
+) -> dict[str, Any]:
+    """Backfill embedding columns for rows not yet embedded with `provider`.
+
+    Vectors travel as pgvector text literals cast in SQL, so no extra database
+    adapter dependency is required. Rows with empty canonical text are excluded
+    by the selection filter, so they are never re-selected.
+    """
+    from store.embedding import build_embed_text, to_sparsevec_literal, to_vector_literal
+
+    rows = conn.execute(_EMBED_SELECT_SQL, (provider.spec.model_id, limit)).fetchall()
+    if not rows:
+        return {"embedded": 0, "model": provider.spec.model_id}
+
+    dense_ok = "dense_text" in provider.spec.supports
+    sparse_ok = "sparse_text" in provider.spec.supports
+    step = max(1, provider.spec.max_batch)
+    embedded = 0
+    for start in range(0, len(rows), step):
+        chunk = rows[start : start + step]
+        texts = [
+            build_embed_text({"title": row[1], "description": row[2], "tags": row[3]})
+            for row in chunk
+        ]
+        dense = provider.dense_text(texts) if dense_ok else [None] * len(chunk)
+        sparse = provider.sparse_text(texts) if sparse_ok else [None] * len(chunk)
+        with conn.cursor() as cur:
+            for row, text, vector, weights in zip(chunk, texts, dense, sparse, strict=True):
+                cur.execute(
+                    _EMBED_UPDATE_SQL,
+                    (
+                        text,
+                        to_vector_literal(vector) if vector is not None else None,
+                        provider.spec.model_id if vector is not None else None,
+                        to_sparsevec_literal(weights) if weights else None,
+                        provider.spec.model_id if weights else None,
+                        row[0],
+                    ),
+                )
+        conn.commit()
+        embedded += len(chunk)
+    return {"embedded": embedded, "model": provider.spec.model_id}
 
 
 def stats(conn: psycopg.Connection) -> dict[str, Any]:
