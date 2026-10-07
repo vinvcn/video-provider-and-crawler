@@ -347,6 +347,8 @@ elif mode == "search_list":
                     ended_terms += 1
                     print("TERM-END %s skipped=%d" % (term, len(rest)))
                 break
+            state["done_keys"] = sorted(done)
+            save_state(state)
             time.sleep(PACE_MS / 1000.0)
         state["done_keys"] = sorted(done)
         save_state(state)
