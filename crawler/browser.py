@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -58,21 +59,22 @@ def _run_once(spec: dict[str, Any], timeout: float | None) -> int:
 def run_fetch(spec: dict[str, Any], timeout: float | None = None, attempts: int = 1) -> int:
     """Execute fetch_batch.py under the browser-use harness; return its exit code.
 
-    With `attempts` > 1, an aborted run (non-zero exit: dropped socket, rate
-    limit) is retried while the state file keeps advancing; a stalled run stops.
+    With `attempts` > 1 every aborted run is retried with backoff: a fresh
+    harness process re-establishes a dropped CDP connection, and the in-page
+    script resumes from the state file (completed work is skipped).
     """
     state_file = str(spec.get("state_file") or "")
     progress = _progress(state_file)
+    total = max(1, int(attempts))
     result = 1
-    for attempt in range(1, max(1, int(attempts)) + 1):
+    for attempt in range(1, total + 1):
         result = _run_once(spec, timeout)
         if result == 0:
             return 0
         current = _progress(state_file)
-        if current <= progress:
-            print(f"[vpc] attempt {attempt} aborted with no progress; giving up")
-            return result
-        print(f"[vpc] attempt {attempt} made progress ({progress} -> {current}); retrying")
-        progress = current
+        print(f"[vpc] attempt {attempt}/{total} exited {result}; progress {progress} -> {current}")
+        progress = max(progress, current)
+        if attempt < total:
+            time.sleep(min(5.0 * attempt, 30.0))
     print("[vpc] attempts exhausted")
     return result
