@@ -23,13 +23,18 @@ Phase 1 仍在跑(搜索扇出),Phase 2 的**接口层**先落地,避免后面�
   因此不需要额外的 python 适配器依赖;选择条件是 `embedding_model IS DISTINCT FROM <model>`,
   空文本行被过滤,永不重复选中(可增量、可续跑)。
   已用 hash provider 冒烟 50 行:768 维 + sparse 均写入成功,随后**已清空**(表留给真实模型)。
-- **测试**:`tests/test_embedding.py`(spec 校验、文本拼装、确定性/归一化、稀疏计数、批上限、
-  字面量格式、provider 注册表)。
+- **本地 BM25(sparse 默认)**:`store/bm25.py`
+  - `Bm25Model`:`fit(docs)` → df/长度统计 + 稳定 term id(高频词 id 小);
+    `idf` / `doc_weights`(corpus 侧)/ `query_weights`(查询侧,点积相容)/ `save`·`load`(JSON)。
+  - `Bm25SparseProvider`:seam 适配器(sparse-only,dim=0)。
+  - 分词与 dense 侧共用 `store.embedding.tokenize`,保证两侧一致。
+- **测试**:`tests/test_embedding.py` + `tests/test_bm25.py`(spec 校验、文本拼装、确定性、
+  批上限、字面量格式、provider 注册表、BM25 统计/归一化/序列化往返)。
 
 ## 2. 刻意未做(下一步工单)
 
-1. 真实 provider:DashScope `tongyi-embedding-vision-flash`(需 MPT config 里的 Key,
-   与 MPT 查重门同向量空间);sparse 的 BM25(本地、无需 Key)。
+1. 真实 dense provider:DashScope `tongyi-embedding-vision-flash`(需 MPT config 里的 Key,
+   与 MPT 查重门同向量空间);BM25 已就位,语料 fit 即可用。
 2. 索引迁移:回填到一定比例后再建 HNSW(cosine)+ `tsv` GIN。
 3. 评测门:召回@k / VLM 采纳率对比现行漏斗(见 handoff §5)。
 

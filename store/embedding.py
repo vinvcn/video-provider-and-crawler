@@ -30,6 +30,14 @@ _WS_RE = re.compile(r"\s+")
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
+def tokenize(text: str) -> list[str]:
+    """Shared lexical tokenizer: lowercase alphanumeric runs.
+
+    Used by every sparse/lexical backend so corpus and query sides agree.
+    """
+    return _TOKEN_RE.findall(str(text).lower())
+
+
 @dataclass(frozen=True)
 class EmbeddingSpec:
     """What a provider guarantees: identity, dimensionality, metric, batch cap."""
@@ -110,7 +118,7 @@ class HashEmbeddingProvider:
 
     @staticmethod
     def _tokens(text: str) -> list[str]:
-        return _TOKEN_RE.findall(text.lower())
+        return tokenize(text)
 
     def dense_text(self, texts: Sequence[str]) -> list[list[float]]:
         if len(texts) > self.spec.max_batch:
