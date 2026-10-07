@@ -74,6 +74,59 @@ def upsert_videos(conn: psycopg.Connection, rows: Iterable[dict[str, Any]]) -> i
     return len(batch)
 
 
+_CATALOG_TABLES = {"videos": "catalog_videos", "queries": "catalog_queries"}
+
+
+def count_catalog(conn: psycopg.Connection, kind: str) -> int:
+    """Row count of the catalog table backing a sitemap kind (videos|queries)."""
+    table = _CATALOG_TABLES[kind]
+    row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+    return int(row[0]) if row else 0
+
+
+def upsert_catalog_videos(
+    conn: psycopg.Connection, rows: Iterable[tuple[int, str | None, str | None]]
+) -> int:
+    """Idempotently upsert video-sitemap (pexels_id, slug, lastmod) rows."""
+    batch = list(rows)
+    if not batch:
+        return 0
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO catalog_videos (pexels_id, slug, lastmod)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (pexels_id) DO UPDATE SET
+                slug = EXCLUDED.slug,
+                lastmod = EXCLUDED.lastmod,
+                last_seen_at = NOW()
+            """,
+            batch,
+        )
+    conn.commit()
+    return len(batch)
+
+
+def upsert_catalog_queries(conn: psycopg.Connection, rows: Iterable[tuple[str, str | None]]) -> int:
+    """Idempotently upsert query-sitemap (term, lastmod) rows."""
+    batch = list(rows)
+    if not batch:
+        return 0
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO catalog_queries (term, lastmod)
+            VALUES (%s, %s)
+            ON CONFLICT (term) DO UPDATE SET
+                lastmod = EXCLUDED.lastmod,
+                last_seen_at = NOW()
+            """,
+            batch,
+        )
+    conn.commit()
+    return len(batch)
+
+
 def stats(conn: psycopg.Connection) -> dict[str, Any]:
     """Library counters for `vpc status`."""
     row = conn.execute(

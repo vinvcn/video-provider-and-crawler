@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from crawler import browser
+from crawler import browser, sitemap
 from crawler.config import load_settings
 from crawler.pexels_v3 import (
     build_search_url,
@@ -68,6 +68,45 @@ def cmd_fetch_search(args: argparse.Namespace) -> int:
         "pace_ms": args.pace_ms,
     }
     return browser.run_fetch(spec)
+
+
+def cmd_fetch_sitemaps(args: argparse.Namespace) -> int:
+    settings = load_settings()
+    conn = db.connect(settings.db_dsn)
+    try:
+        kinds = ["videos", "queries"] if args.kind == "all" else [args.kind]
+        summary: dict[str, dict[str, int]] = {}
+        for kind in kinds:
+            before = db.count_catalog(conn, kind)
+            shards = 0
+            entries = 0
+            for name, rows in sitemap.iter_shards(
+                kind,
+                settings.spool_dir,
+                use_proxy=settings.use_proxy,
+                pace_s=args.pace_ms / 1000.0,
+                limit_shards=args.limit_shards,
+            ):
+                if kind == "videos":
+                    db.upsert_catalog_videos(
+                        conn, [(row.pexels_id, row.slug, row.lastmod) for row in rows]
+                    )
+                else:
+                    db.upsert_catalog_queries(conn, rows)
+                shards += 1
+                entries += len(rows)
+                print(f"SHARD {name} n={len(rows)}")
+            after = db.count_catalog(conn, kind)
+            summary[kind] = {
+                "shards": shards,
+                "entries": entries,
+                "new": after - before,
+                "total": after,
+            }
+        print(json.dumps(summary, ensure_ascii=False))
+    finally:
+        conn.close()
+    return 0
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
@@ -146,6 +185,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pool", type=int, default=4)
     p.add_argument("--pace-ms", type=int, default=1500)
     p.set_defaults(func=cmd_fetch_search)
+
+    p = sub.add_parser("fetch-sitemaps", help="harvest catalog IDs and the search-query universe")
+    p.add_argument("--kind", choices=["videos", "queries", "all"], default="all")
+    p.add_argument("--pace-ms", type=int, default=1000)
+    p.add_argument("--limit-shards", type=int)
+    p.set_defaults(func=cmd_fetch_sitemaps)
 
     p = sub.add_parser("ingest", help="spool -> normalize -> upsert -> thumbnails")
     p.add_argument("--kind", choices=["seed", "search"], default=None)
