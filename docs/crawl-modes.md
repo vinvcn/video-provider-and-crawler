@@ -50,6 +50,11 @@ spec 通过临时文件传递;不下载视频、不使用官方 API key。
 | seed 单页失败 | 写 `PAGE-FAIL` 记录并停批,游标停在最后成功页,重跑续接 |
 | Chrome 崩溃 | 需外部拉起(`DISPLAY=:0 setsid nohup google-chrome &`);harness 会提示
 "Allow remote debugging?" 一次。状态文件保证 0 丢失 |
+| 抓取 tab 被别的任务导航走 | `TAB-FOREIGN … (abandoning context)`:自动弃用被污染的 context、新建匿名 context + pexels tab,不碰别人的 tab |
+
+> **共享 daemon 注意**:本机 `browser-use` daemon 是多项目共用的,别人(或其他 agent)
+> 可能导航我们的 tab,导致页内 fetch 全部 CORS 失败(status 0)。爬虫已能自动恢复
+> (§3 最后一行);如需进一步隔离可用命名 daemon(`BU_NAME=vpc browser-use …`)。
 
 ## 4. 限速约定(AGENTS.md)
 
