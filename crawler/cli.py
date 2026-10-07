@@ -55,6 +55,7 @@ def cmd_fetch_search(args: argparse.Namespace) -> int:
             targets.append(
                 {
                     "key": f"search-{term_slug(term)}-p{page}",
+                    "term": term,
                     "url": build_search_url(term, page),
                 }
             )

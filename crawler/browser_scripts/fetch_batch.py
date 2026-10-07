@@ -206,31 +206,90 @@ elif mode == "search_list":
     targets = SPEC["targets"]
     done = set(state.get("done_keys", []))
     pending = [t for t in targets if t["key"] not in done]
+
+    # Group page targets by term (declaration order preserved) so a term that
+    # returns an empty page stops paging there instead of burning the rest of
+    # its page budget on guaranteed-empty requests.
+    terms_order = []
+    by_term = {}
+    for target in pending:
+        term = target.get("term") or target["key"]
+        if term not in by_term:
+            by_term[term] = []
+            terms_order.append(term)
+        by_term[term].append(target)
+
     ok_count = 0
-    for start in range(0, len(pending), POOL):
-        chunk = pending[start : start + POOL]
-        results = fetch_many([t["url"] for t in chunk])
-        for target, result in zip(chunk, results, strict=True):
-            if result.get("status") != 200:
-                time.sleep(1.5)
-                result = fetch_one_retry(target["url"])
-            body = parse_body(result)
-            if body is None:
-                write_spool(
-                    target["key"],
-                    target["url"],
-                    {"status": result.get("status", 0), "error": error_text(result)},
-                )
-                print("ITEM-FAIL %s status=%s" % (target["key"], result.get("status")))
-                continue
-            write_spool(target["key"], target["url"], {"status": 200, "body": body})
-            done.add(target["key"])
-            ok_count += 1
-            print("ITEM %s n=%d" % (target["key"], len(body.get("data") or [])))
+    ended_terms = 0
+    fail_streak = 0
+
+    for term in terms_order:
+        pages = by_term[term]
+        for start in range(0, len(pages), POOL):
+            chunk = pages[start : start + POOL]
+            results = fetch_many([t["url"] for t in chunk])
+            term_ended = False
+            for target, result in zip(chunk, results, strict=True):
+                if result.get("status") != 200:
+                    time.sleep(1.5)
+                    result = fetch_one_retry(target["url"])
+                body = parse_body(result)
+                if body is None:
+                    write_spool(
+                        target["key"],
+                        target["url"],
+                        {"status": result.get("status", 0), "error": error_text(result)},
+                    )
+                    print("ITEM-FAIL %s status=%s" % (target["key"], result.get("status")))
+                    fail_streak += 1
+                    if fail_streak >= 8:
+                        state["done_keys"] = sorted(done)
+                        save_state(state)
+                        print(
+                            "ABORT fail-streak=%d term=%s (browser/daemon likely down)"
+                            % (fail_streak, term)
+                        )
+                        print(
+                            "SUMMARY "
+                            + json.dumps(
+                                {
+                                    "mode": mode,
+                                    "fetched": ok_count,
+                                    "total": len(targets),
+                                    "aborted": True,
+                                }
+                            )
+                        )
+                        raise SystemExit(1)
+                    continue
+                fail_streak = 0
+                data = body.get("data") or []
+                write_spool(target["key"], target["url"], {"status": 200, "body": body})
+                done.add(target["key"])
+                ok_count += 1
+                print("ITEM %s n=%d" % (target["key"], len(data)))
+                if not data:
+                    term_ended = True
+            if term_ended:
+                rest = [t["key"] for t in pages[start + POOL :]]
+                if rest:
+                    done.update(rest)
+                    ended_terms += 1
+                    print("TERM-END %s skipped=%d" % (term, len(rest)))
+                break
+            time.sleep(PACE_MS / 1000.0)
         state["done_keys"] = sorted(done)
         save_state(state)
-        print("BATCH %d/%d" % (min(start + POOL, len(pending)), len(pending)))
-        time.sleep(PACE_MS / 1000.0)
-    print("SUMMARY " + json.dumps({"mode": mode, "fetched": ok_count, "total": len(targets)}))
+    print(
+        "SUMMARY "
+        + json.dumps(
+            {
+                "mode": mode,
+                "fetched": ok_count,
+                "ended_terms": ended_terms,
+                "total": len(targets),
+            }
+        )
+    )
 else:
     print("ERROR unknown mode: %s" % mode)
