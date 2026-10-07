@@ -135,12 +135,23 @@ def error_text(result):
 
 
 def ensure_tab(state):
+    """Attach to our pexels.com tab, or create one; never navigate foreign tabs.
+
+    The browser-use daemon is shared across tasks on this machine, so the saved
+    target can be navigated elsewhere by another task — in-page fetch to pexels
+    then dies on CORS. In that case abandon that (polluted) context and create a
+    fresh anonymous one, leaving the foreign tab untouched.
+    """
     target_id = state.get("target_id")
     context_id = state.get("browser_context_id")
     infos = cdp("Target.getTargets")["targetInfos"]
-    if target_id and any(t["targetId"] == target_id for t in infos):
+    info = next((t for t in infos if t["targetId"] == target_id), None) if target_id else None
+    if info is not None and str(info.get("url") or "").startswith("https://www.pexels.com"):
         switch_tab(target_id)
         return context_id, target_id
+    if info is not None:
+        print("TAB-FOREIGN %s -> %s (abandoning context)" % (target_id, str(info.get("url"))[:70]))
+        context_id = None
     if context_id:
         try:
             known = cdp("Target.getBrowserContexts").get("browserContextIds", [])
