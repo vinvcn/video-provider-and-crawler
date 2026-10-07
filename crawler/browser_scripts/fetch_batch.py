@@ -5,6 +5,7 @@
 import json
 import os
 import time
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
@@ -167,39 +168,90 @@ state["browser_context_id"] = context_id
 state["target_id"] = target_id
 save_state(state)
 
+def to_ts(value):
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def crossed(cursor, marker):
+    """True when `cursor` has reached or passed `marker` (ISO timestamps)."""
+    a, b = to_ts(cursor), to_ts(marker)
+    if a is not None and b is not None:
+        return a <= b
+    return str(cursor) <= str(marker)
+
+
 mode = SPEC["mode"]
 
 if mode == "seed_chain":
     base_url = SPEC["base_url"]
-    cursor = state.get("cursor") or ""
+    head_mode = bool(SPEC.get("head"))
+    marker = SPEC.get("until") or (state.get("head_cursor") if head_mode else None)
+    cursor = "" if head_mode else (state.get("cursor") or "")
+    run_date = time.strftime("%Y%m%d")
+    pages_total = 0 if head_mode else int(state.get("seed_pages", 0))
+    run_head_cursor = None
+    completed = False
     fetched = 0
-    pages_total = int(state.get("seed_pages", 0))
     while fetched < MAX_PAGES:
+        if marker and cursor and crossed(cursor, marker):
+            print("UNTIL-REACHED cursor=%s marker=%s" % (cursor, marker))
+            completed = True
+            break
         url = base_url + ("&seed=" + quote(str(cursor), safe="") if cursor else "")
         result = fetch_one_retry(url)
         pages_total += 1
-        key = "seed-%06d" % pages_total
+        if head_mode:
+            key = "head-%s-%06d" % (run_date, pages_total)
+        else:
+            key = "seed-%06d" % pages_total
         body = parse_body(result)
         if body is None:
-            write_spool(key, url, {"status": result.get("status", 0), "error": error_text(result)})
-            print("PAGE-FAIL %s status=%s" % (key, result.get("status")))
+            status = result.get("status", 0)
+            write_spool(key, url, {"status": status, "error": error_text(result)})
+            print("PAGE-FAIL %s status=%s" % (key, status))
+            if status in (401, 403, 429):
+                print("ABORT status=%s (auth/rate-limit) — batch stopped" % status)
             break
         write_spool(key, url, {"status": 200, "body": body})
-        state["seed_pages"] = pages_total
         pagination = body.get("pagination") or {}
+        if head_mode and run_head_cursor is None:
+            run_head_cursor = pagination.get("cursor") or ""
         cursor = pagination.get("cursor") or ""
-        state["cursor"] = cursor
+        if not head_mode:
+            state["seed_pages"] = pages_total
+            state["cursor"] = cursor
         save_state(state)
         fetched += 1
         print("PAGE %s n=%d cursor=%s" % (key, len(body.get("data") or []), cursor))
+        if head_mode and marker is None:
+            print("HEAD-BOOTSTRAP first page only; marker will be set to %s" % run_head_cursor)
+            completed = True
+            break
         if not cursor or pagination.get("more_data") is False:
             print("SEED-EXHAUSTED")
+            completed = True
             break
         time.sleep(PACE_MS / 1000.0)
+    if head_mode and completed and run_head_cursor:
+        state["head_cursor"] = run_head_cursor
+        state["run_date"] = run_date
+        save_state(state)
+        print("HEAD-MARKER advanced to %s" % run_head_cursor)
     print(
         "SUMMARY "
         + json.dumps(
-            {"mode": mode, "fetched": fetched, "pages_total": pages_total, "cursor": cursor}
+            {
+                "mode": mode,
+                "head": head_mode,
+                "fetched": fetched,
+                "pages_total": pages_total,
+                "cursor": cursor,
+                "marker": marker,
+                "completed": completed,
+            }
         )
     )
 
@@ -236,12 +288,29 @@ elif mode == "search_list":
                     result = fetch_one_retry(target["url"])
                 body = parse_body(result)
                 if body is None:
+                    status = result.get("status", 0)
                     write_spool(
                         target["key"],
                         target["url"],
-                        {"status": result.get("status", 0), "error": error_text(result)},
+                        {"status": status, "error": error_text(result)},
                     )
-                    print("ITEM-FAIL %s status=%s" % (target["key"], result.get("status")))
+                    print("ITEM-FAIL %s status=%s" % (target["key"], status))
+                    if status in (401, 403, 429):
+                        state["done_keys"] = sorted(done)
+                        save_state(state)
+                        print("ABORT status=%s (auth/rate-limit) term=%s" % (status, term))
+                        print(
+                            "SUMMARY "
+                            + json.dumps(
+                                {
+                                    "mode": mode,
+                                    "fetched": ok_count,
+                                    "total": len(targets),
+                                    "aborted": True,
+                                }
+                            )
+                        )
+                        raise SystemExit(1)
                     fail_streak += 1
                     if fail_streak >= 8:
                         state["done_keys"] = sorted(done)

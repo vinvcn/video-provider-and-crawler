@@ -31,16 +31,19 @@ def cmd_migrate(args: argparse.Namespace) -> int:
 
 def cmd_fetch_seed(args: argparse.Namespace) -> int:
     settings = load_settings()
+    kind = "seed-head" if args.head else "seed"
     spec = {
         "mode": "seed_chain",
         "base_url": build_seed_url(None),
         "headers": request_headers(settings.pexels_secret),
-        "out_dir": str(settings.spool_dir / "seed"),
-        "state_file": str(_state_file("seed")),
+        "out_dir": str(settings.spool_dir / kind),
+        "state_file": str(_state_file(kind)),
         "max_pages": args.pages,
         "pace_ms": args.pace_ms,
+        "head": bool(args.head),
+        "until": args.until,
     }
-    return browser.run_fetch(spec)
+    return browser.run_fetch(spec, attempts=args.retries)
 
 
 def cmd_fetch_search(args: argparse.Namespace) -> int:
@@ -68,7 +71,7 @@ def cmd_fetch_search(args: argparse.Namespace) -> int:
         "pool": args.pool,
         "pace_ms": args.pace_ms,
     }
-    return browser.run_fetch(spec)
+    return browser.run_fetch(spec, attempts=args.retries)
 
 
 def cmd_fetch_sitemaps(args: argparse.Namespace) -> int:
@@ -178,6 +181,15 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("fetch-seed", help="crawl the popular-feed seed chain")
     p.add_argument("--pages", type=int, default=100)
     p.add_argument("--pace-ms", type=int, default=1500)
+    p.add_argument("--until", help="stop once the chain cursor reaches this ISO timestamp")
+    p.add_argument(
+        "--head",
+        action="store_true",
+        help="start from the live feed head and track the head marker (daily incremental mode)",
+    )
+    p.add_argument(
+        "--retries", type=int, default=1, help="retry aborted runs while progress is made"
+    )
     p.set_defaults(func=cmd_fetch_seed)
 
     p = sub.add_parser("fetch-search", help="crawl keyword search pages")
@@ -185,6 +197,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pages-per-term", type=int, default=2)
     p.add_argument("--pool", type=int, default=4)
     p.add_argument("--pace-ms", type=int, default=1500)
+    p.add_argument(
+        "--retries", type=int, default=1, help="retry aborted runs while progress is made"
+    )
     p.set_defaults(func=cmd_fetch_search)
 
     p = sub.add_parser("fetch-sitemaps", help="harvest catalog IDs and the search-query universe")

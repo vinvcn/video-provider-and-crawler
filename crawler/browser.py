@@ -12,12 +12,25 @@ from typing import Any
 SCRIPT_PATH = Path(__file__).resolve().parent / "browser_scripts" / "fetch_batch.py"
 
 
-def run_fetch(spec: dict[str, Any], timeout: float | None = None) -> int:
-    """Execute fetch_batch.py under the browser-use harness; return its exit code.
+def _progress(state_file: str) -> int:
+    """Cheap progress probe over a run's state file (search keys or seed pages)."""
+    try:
+        data = json.loads(Path(state_file).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return -1
+    done = data.get("done_keys")
+    if isinstance(done, list):
+        return len(done)
+    try:
+        return int(data.get("seed_pages", 0) or 0)
+    except (TypeError, ValueError):
+        return -1
 
-    The spec goes through a temp file, not an environment variable: large specs
-    (thousands of search targets) exceed the per-env-var size limit (~128KB).
-    """
+
+def _run_once(spec: dict[str, Any], timeout: float | None) -> int:
+    """One `browser-use` invocation. The spec goes through a temp file, not an
+    environment variable: large specs (thousands of search targets) exceed the
+    per-env-var size limit (~128KB)."""
     handle = tempfile.NamedTemporaryFile(
         "w", suffix=".json", prefix="vpc-spec-", delete=False, encoding="utf-8"
     )
@@ -40,3 +53,26 @@ def run_fetch(spec: dict[str, Any], timeout: float | None = None) -> int:
             os.unlink(path)
         except OSError:
             pass
+
+
+def run_fetch(spec: dict[str, Any], timeout: float | None = None, attempts: int = 1) -> int:
+    """Execute fetch_batch.py under the browser-use harness; return its exit code.
+
+    With `attempts` > 1, an aborted run (non-zero exit: dropped socket, rate
+    limit) is retried while the state file keeps advancing; a stalled run stops.
+    """
+    state_file = str(spec.get("state_file") or "")
+    progress = _progress(state_file)
+    result = 1
+    for attempt in range(1, max(1, int(attempts)) + 1):
+        result = _run_once(spec, timeout)
+        if result == 0:
+            return 0
+        current = _progress(state_file)
+        if current <= progress:
+            print(f"[vpc] attempt {attempt} aborted with no progress; giving up")
+            return result
+        print(f"[vpc] attempt {attempt} made progress ({progress} -> {current}); retrying")
+        progress = current
+    print("[vpc] attempts exhausted")
+    return result
