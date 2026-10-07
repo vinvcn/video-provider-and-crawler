@@ -1,0 +1,43 @@
+[project]
+name = "video-provider-and-crawler"
+version = "0.1.0"
+description = "Crawl pexels.com video metadata and build a dense+sparse hybrid index."
+requires-python = ">=3.11"
+dependencies = [
+    "httpx[socks]>=0.27",
+    "psycopg[binary]>=3.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+vpc = "crawler.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["crawler", "store"]
+
+[tool.setuptools.package-data]
+crawler = ["browser_scripts/*.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# Harness script: runs under `browser-use`, which pre-injects cdp/switch_tab,
+# and uses %-formatting for JS template literals ({} would clash with JS braces).
+"crawler/browser_scripts/*.py" = ["F821", "UP031"]

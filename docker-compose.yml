@@ -1,0 +1,26 @@
+# stock-db: the dedicated metadata / (Phase 2) vector store for the stock library.
+# Deliberately separate from the production videogen stack (see docs/handoff §3, decision #6).
+services:
+  stock-db:
+    image: pgvector/pgvector:pg16
+    container_name: vpc-stock-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: stock
+    ports:
+      - "127.0.0.1:15433:5432"
+    volumes:
+      - stock-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d stock"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          memory: 6g
+
+volumes:
+  stock-db-data:
