@@ -1,13 +1,14 @@
 # In-page fetch batch for the Pexels internal v3 API.
 # Executed under the `browser-use` harness:  browser-use < crawler/browser_scripts/fetch_batch.py
-# Spec arrives as JSON in env VPC_FETCH_SPEC; responses land in spec["out_dir"]
-# as spool records; resume state lives in spec["state_file"].
+# Spec arrives as a JSON file path in env VPC_FETCH_SPEC_FILE; responses land in
+# spec["out_dir"] as spool records; resume state lives in spec["state_file"].
 import json
 import os
 import time
+from pathlib import Path
 from urllib.parse import quote
 
-SPEC = json.loads(os.environ["VPC_FETCH_SPEC"])
+SPEC = json.loads(Path(os.environ["VPC_FETCH_SPEC_FILE"]).read_text(encoding="utf-8"))
 OUT_DIR = SPEC["out_dir"]
 STATE_FILE = SPEC["state_file"]
 HEADERS_JS = json.dumps(SPEC.get("headers", {}))
