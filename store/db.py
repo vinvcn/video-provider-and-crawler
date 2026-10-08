@@ -42,7 +42,11 @@ ON CONFLICT (pexels_id) DO UPDATE SET
     source = EXCLUDED.source,
     raw = EXCLUDED.raw,
     updated_at = NOW()
+WHERE stock_videos.raw IS DISTINCT FROM EXCLUDED.raw
 """
+# The WHERE guard makes replayed, byte-identical records a no-op: no heap
+# rewrite, no index churn, no updated_at bump. `raw` holds the full source
+# payload, so it is a faithful change detector for every derived column.
 
 
 def connect(dsn: str | None = None) -> psycopg.Connection:
@@ -75,6 +79,7 @@ def upsert_videos(conn: psycopg.Connection, rows: Iterable[dict[str, Any]]) -> i
 
 
 _CATALOG_TABLES = {"videos": "catalog_videos", "queries": "catalog_queries"}
+
 
 def count_catalog(conn: psycopg.Connection, kind: str) -> int:
     """Row count of the catalog table backing a sitemap kind (videos|queries)."""
@@ -151,9 +156,7 @@ WHERE pexels_id = %s
 """
 
 
-def embed_pending(
-    conn: psycopg.Connection, provider: Any, limit: int = 1000
-) -> dict[str, Any]:
+def embed_pending(conn: psycopg.Connection, provider: Any, limit: int = 1000) -> dict[str, Any]:
     """Backfill embedding columns for rows not yet embedded with `provider`.
 
     Vectors travel as pgvector text literals cast in SQL, so no extra database

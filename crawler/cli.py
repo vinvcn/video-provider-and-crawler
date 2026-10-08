@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 from crawler import browser, nextdata, sitemap
@@ -15,7 +16,13 @@ from crawler.pexels_v3 import (
     normalize_video,
     request_headers,
 )
-from crawler.spool import iter_records, record_attributes, term_slug
+from crawler.spool import (
+    iter_records,
+    load_ingest_marks,
+    record_attributes,
+    save_ingest_marks,
+    term_slug,
+)
 from store import db, embedding, migrate, thumbnails
 
 
@@ -86,8 +93,7 @@ def cmd_fetch_ids(args: argparse.Namespace) -> int:
         print(json.dumps({"targets": 0, "note": "catalog gap is empty"}, ensure_ascii=False))
         return 0
     targets = [
-        {"key": f"id-{pexels_id}", "id": pexels_id, "slug": slug or ""}
-        for pexels_id, slug in rows
+        {"key": f"id-{pexels_id}", "id": pexels_id, "slug": slug or ""} for pexels_id, slug in rows
     ]
     spec = {
         "mode": "id_list",
@@ -147,9 +153,13 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     skipped = 0
     conn = db.connect(settings.db_dsn)
     try:
+        marks = {} if args.full else load_ingest_marks()
+        run_started_ns = time.time_ns()
+        touched: set[str] = set()
         pending: list[dict] = []
-        for record in iter_records(args.kind):
+        for record in iter_records(args.kind, since_ns=None if args.full else marks):
             seen += 1
+            touched.add(Path(record["_path"]).parent.name)
             attributes = record_attributes(record)
             if not attributes:
                 skipped += 1
@@ -160,10 +170,18 @@ def cmd_ingest(args: argparse.Namespace) -> int:
                 upserted += db.upsert_videos(conn, pending)
                 pending = []
         upserted += db.upsert_videos(conn, pending)
+        if not args.full:
+            # Floors advance only after a completed pass, so a crash mid-run
+            # replays the unprocessed files on the next run (upserts are idempotent).
+            for kind_name in touched:
+                marks[kind_name] = run_started_ns
+            save_ingest_marks(marks)
         result: dict[str, object] = {
             "records": seen,
             "upserted": upserted,
             "skipped": skipped,
+            "mode": "full" if args.full else "incremental",
+            "kinds": sorted(touched),
         }
         if not args.skip_thumbnails:
             result["thumbnails"] = thumbnails.download_pending(
@@ -251,6 +269,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("ingest", help="spool -> normalize -> upsert -> thumbnails")
     p.add_argument("--kind", choices=["seed", "search", "ids"], default=None)
+    p.add_argument(
+        "--full",
+        action="store_true",
+        help="replay the entire spool, ignoring ingest watermarks (state/ingest.json)",
+    )
     p.add_argument("--batch", type=int, default=500)
     p.add_argument("--skip-thumbnails", action="store_true")
     p.add_argument("--thumb-limit", type=int, default=2000)

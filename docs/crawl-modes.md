@@ -13,7 +13,7 @@
 | `vpc fetch-search --terms "a,b" --pages-per-term N` | 关键词搜索(每词 ≤20 页 / 480 条) | `state/search.json` | `spool/search/` |
 | `vpc fetch-ids --limit N [--order lastmod\|id\|random]` | 按 ID 取元数据(Next 数据路由,补目录缺口) | `state/ids.json` | `spool/ids/` |
 | `vpc fetch-sitemaps --kind all` | 落 video/query sitemap(目录 oracle + 查询宇宙) | (DB 表) | `spool/sitemap/` |
-| `vpc ingest [--kind K] [--skip-thumbnails]` | spool → 规范化 → upsert →(可选)缩略图 | — | — |
+| `vpc ingest [--kind K] [--skip-thumbnails] [--full]` | spool → 规范化 → upsert →(可选)缩略图;**默认增量**(只吃未消费的 spool) | `state/ingest.json`(消费水位) | — |
 | `vpc status` | 库存计数 | — | — |
 | `vpc migrate` | 前向迁移 | — | — |
 
@@ -101,7 +101,13 @@ storage/
   state/seed.json          深层游标 + seed_pages
   state/seed-head.json     head_cursor 标记 + run_date
   state/search.json        done_keys
+  state/ids.json           按 ID 抓取进度
+  state/ingest.json        每个 kind 的 spool 消费水位(mtime_ns 下限)
   thumbnails/<pexels_id>.jpg
 ```
 
 原始响应先落 spool 再入库,全部可重放(`vpc ingest` 幂等,`pexels_id` 为键)。
+`vpc ingest` 默认增量:按 `state/ingest.json` 的水位只处理新增或被重写的 spool 文件
+(失败/中断不推进水位,下次自动重放)。删除 `state/ingest.json` 或加 `--full` 即整库重放。
+写库侧还有第二个闸门:`ON CONFLICT ... WHERE raw IS DISTINCT FROM EXCLUDED.raw`,
+内容未变的记录不会重写行、不刷 `updated_at`。
