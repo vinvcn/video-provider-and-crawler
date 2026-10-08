@@ -15,7 +15,7 @@
 
 ```bash
 make sync            # uv sync(安装依赖 + vpc CLI)
-make up              # 起 stock-db(pgvector/pgvector:pg16, 127.0.0.1:15433)
+make up              # 起共享基建 dev_middleware 中的 stock-db(pgvector/pgvector:pg16, 127.0.0.1:15433)
 make migrate         # 应用 migrations/*.sql
 
 # Phase 1 爬取(需要本机 Chrome + browser-use)

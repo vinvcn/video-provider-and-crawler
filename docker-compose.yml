@@ -1,26 +1,18 @@
-# stock-db: the dedicated metadata / (Phase 2) vector store for the stock library.
-# Deliberately separate from the production videogen stack (see docs/handoff §3, decision #6).
-services:
-  stock-db:
-    image: pgvector/pgvector:pg16
-    container_name: vpc-stock-db
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: stock
-    ports:
-      - "127.0.0.1:15433:5432"
-    volumes:
-      - stock-db-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d stock"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-    deploy:
-      resources:
-        limits:
-          memory: 6g
+# stock-db 服务已迁移说明（2026-10-07）
 
-volumes:
-  stock-db-data:
+本项目的 PostgreSQL（pgvector，服务名 `stock-db`，容器 `vpc-stock-db`）已迁入
+全机器共享的中间件基建 **`$HOME/infrastructure/middleware/dev`**（compose 项目名 `dev-middleware`）。
+
+- 容器：`dev-middleware-stock-db`，镜像 `pgvector/pgvector:pg16`
+- 连接信息保持不变：`postgresql://postgres:postgres@127.0.0.1:15433/stock`
+  （代码默认 DSN 与 `VPC_DB_DSN` 环境变量均无需改动）
+- 容器网络内（dev-middleware_data-platform）：`stock-db:5432`
+- 原数据卷 `video-provider-and-crawler_stock-db-data` 已迁入
+  `dev-middleware_stock_db_data`，旧卷保留为备份，确认无误后可删除。
+
+启动共享基建：
+
+```bash
+cd $HOME/infrastructure/middleware/dev
+docker compose --env-file .env -f compose.yaml up -d stock-db
+```
