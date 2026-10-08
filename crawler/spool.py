@@ -37,6 +37,27 @@ def write_record(kind: str, key: str, url: str, payload: dict[str, Any]) -> Path
     return path
 
 
+def record_attributes(record: dict[str, Any]) -> list[dict[str, Any]]:
+    """Attribute objects inside one spool record, for every payload shape.
+
+    List payloads (`body.data[].attributes`, from feed and search) yield their
+    items; per-id payloads (`attributes`, from the Next data route) yield one.
+    """
+    single = record.get("attributes")
+    if isinstance(single, dict) and "id" in single:
+        return [single]
+    body = record.get("body")
+    items = body.get("data") if isinstance(body, dict) else None
+    if not isinstance(items, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in items:
+        attributes = item.get("attributes") if isinstance(item, dict) else None
+        if isinstance(attributes, dict) and "id" in attributes:
+            out.append(attributes)
+    return out
+
+
 def iter_records(kind: str | None = None) -> Iterator[dict[str, Any]]:
     """Yield spool records (for `ingest`); file-name order within each kind."""
     spool_dir = load_settings().spool_dir

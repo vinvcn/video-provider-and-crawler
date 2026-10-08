@@ -7,14 +7,15 @@ import json
 import sys
 from pathlib import Path
 
-from crawler import browser, sitemap
+from crawler import browser, nextdata, sitemap
 from crawler.config import load_settings
 from crawler.pexels_v3 import (
     build_search_url,
     build_seed_url,
+    normalize_video,
     request_headers,
 )
-from crawler.spool import iter_records, term_slug
+from crawler.spool import iter_records, record_attributes, term_slug
 from store import db, embedding, migrate, thumbnails
 
 
@@ -74,6 +75,32 @@ def cmd_fetch_search(args: argparse.Namespace) -> int:
     return browser.run_fetch(spec, attempts=args.retries)
 
 
+def cmd_fetch_ids(args: argparse.Namespace) -> int:
+    settings = load_settings()
+    conn = db.connect(settings.db_dsn)
+    try:
+        rows = db.catalog_gap(conn, limit=args.limit, order=args.order)
+    finally:
+        conn.close()
+    if not rows:
+        print(json.dumps({"targets": 0, "note": "catalog gap is empty"}, ensure_ascii=False))
+        return 0
+    targets = [
+        {"key": f"id-{pexels_id}", "id": pexels_id, "slug": slug or ""}
+        for pexels_id, slug in rows
+    ]
+    spec = {
+        "mode": "id_list",
+        "targets": targets,
+        "url_template": nextdata.DATA_URL_TEMPLATE,
+        "out_dir": str(settings.spool_dir / "ids"),
+        "state_file": str(_state_file("ids")),
+        "pool": args.pool,
+        "pace_ms": args.pace_ms,
+    }
+    return browser.run_fetch(spec, attempts=args.retries)
+
+
 def cmd_fetch_sitemaps(args: argparse.Namespace) -> int:
     settings = load_settings()
     conn = db.connect(settings.db_dsn)
@@ -123,18 +150,11 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         pending: list[dict] = []
         for record in iter_records(args.kind):
             seen += 1
-            body = record.get("body")
-            items = body.get("data") if isinstance(body, dict) else None
-            if not isinstance(items, list):
+            attributes = record_attributes(record)
+            if not attributes:
                 skipped += 1
                 continue
-            for item in items:
-                attrs = item.get("attributes") if isinstance(item, dict) else None
-                if not isinstance(attrs, dict) or "id" not in attrs:
-                    skipped += 1
-                    continue
-                from crawler.pexels_v3 import normalize_video
-
+            for attrs in attributes:
                 pending.append(normalize_video(attrs))
             if len(pending) >= args.batch:
                 upserted += db.upsert_videos(conn, pending)
@@ -219,8 +239,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit-shards", type=int)
     p.set_defaults(func=cmd_fetch_sitemaps)
 
+    p = sub.add_parser("fetch-ids", help="per-video metadata via the Next data route (gap fill)")
+    p.add_argument("--limit", type=int, default=500)
+    p.add_argument("--order", choices=["lastmod", "id", "random"], default="lastmod")
+    p.add_argument("--pool", type=int, default=4)
+    p.add_argument("--pace-ms", type=int, default=1000)
+    p.add_argument(
+        "--retries", type=int, default=1, help="retry aborted runs while progress is made"
+    )
+    p.set_defaults(func=cmd_fetch_ids)
+
     p = sub.add_parser("ingest", help="spool -> normalize -> upsert -> thumbnails")
-    p.add_argument("--kind", choices=["seed", "search"], default=None)
+    p.add_argument("--kind", choices=["seed", "search", "ids"], default=None)
     p.add_argument("--batch", type=int, default=500)
     p.add_argument("--skip-thumbnails", action="store_true")
     p.add_argument("--thumb-limit", type=int, default=2000)

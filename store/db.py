@@ -196,6 +196,30 @@ def embed_pending(
     return {"embedded": embedded, "model": provider.spec.model_id}
 
 
+_CATALOG_GAP_ORDER = {
+    "lastmod": "c.lastmod DESC NULLS LAST, c.pexels_id DESC",
+    "id": "c.pexels_id DESC",
+    "random": "random()",
+}
+
+
+def catalog_gap(
+    conn: psycopg.Connection, limit: int = 500, order: str = "lastmod"
+) -> list[tuple[int, str | None]]:
+    """Catalog IDs still missing from stock_videos (gap-fill worklist)."""
+    clause = _CATALOG_GAP_ORDER.get(order)
+    if clause is None:
+        raise ValueError(f"unknown order: {order}")
+    sql = f"""
+        SELECT c.pexels_id, c.slug
+        FROM catalog_videos c
+        WHERE NOT EXISTS (SELECT 1 FROM stock_videos s WHERE s.pexels_id = c.pexels_id)
+        ORDER BY {clause}
+        LIMIT %s
+    """
+    return [(int(row[0]), row[1]) for row in conn.execute(sql, (limit,)).fetchall()]
+
+
 def stats(conn: psycopg.Connection) -> dict[str, Any]:
     """Library counters for `vpc status`."""
     row = conn.execute(

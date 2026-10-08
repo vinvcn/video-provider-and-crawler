@@ -11,6 +11,7 @@
 | `vpc fetch-seed --pages N` | 热门 feed 链式翻页(游标向下) | `state/seed.json` | `spool/seed/` |
 | `vpc fetch-seed --head [--until ISO]` | **每日增量**:从实时 head 往下走,走到上次 head 标记停 | `state/seed-head.json` | `spool/seed-head/` |
 | `vpc fetch-search --terms "a,b" --pages-per-term N` | 关键词搜索(每词 ≤20 页 / 480 条) | `state/search.json` | `spool/search/` |
+| `vpc fetch-ids --limit N [--order lastmod\|id\|random]` | 按 ID 取元数据(Next 数据路由,补目录缺口) | `state/ids.json` | `spool/ids/` |
 | `vpc fetch-sitemaps --kind all` | 落 video/query sitemap(目录 oracle + 查询宇宙) | (DB 表) | `spool/sitemap/` |
 | `vpc ingest [--kind K] [--skip-thumbnails]` | spool → 规范化 → upsert →(可选)缩略图 | — | — |
 | `vpc status` | 库存计数 | — | — |
@@ -37,8 +38,20 @@ spec 通过临时文件传递;不下载视频、不使用官方 API key。
 - 某页返回 0 条即认为该词已尽,**自动跳过该词剩余页**(`TERM-END`),省请求。
 - `state["done_keys"]` 记录已完成页;重跑同词表自动续跑。
 
-### 2.3 sitemap(`fetch-sitemaps`)
-- `/sitemaps/` 在 robots.txt 白名单内,不受 Cloudflare 挑战;索引 → 27+14 个 `.gz` shard。
+### 2.3 按 ID 补全(`fetch-ids`)
+
+- 目标来自 `catalog_videos` 里尚未入库的 ID(默认 `--order lastmod` 新→旧;可选 `id` / `random`)。
+- 走 Next.js 数据路由(不经 Cloudflare 挑战):
+  `/_next/data/<buildId>/en-us/video/<slug>-<id>.json` → `pageProps.medium.attributes`。
+- `buildId`:优先读当前页面的 `window.__NEXT_DATA__.buildId`(读不到就导航一次并轮询),
+  成功后持久化到 `state/ids.json`;站点发版后若整批 404 会自动重读(`BUILD-REFRESH`)。
+- 404 视为已删除/未收录:写 spool 记录并标记完成,不再重试(计入 `missing`)。
+- spool 记录形如 `{"status":200,"attributes":{…}}`(与列表项同构);`vpc ingest --kind ids` 兼容。
+- 速率:约 1 请求/视频、~85KB;pool 4 起步。
+- 已知差异:数据路由返回的 `tags` 比列表/搜索少(3–10 vs 40–50,后者用了 `seo_tags=true`)——
+  补全后如需富化,可按 tags 数少的行做定向刷新(待验证 `seo_tags` 在数据路由是否生效)。
+
+### 2.4 sitemap(`fetch-sitemaps`)- `/sitemaps/` 在 robots.txt 白名单内,不受 Cloudflare 挑战;索引 → 27+14 个 `.gz` shard。
 - 原始 shard 落 `spool/sitemap/`,解析后 upsert 进 `catalog_videos` / `catalog_queries`。
 - 用途:覆盖率 oracle(665k ID)与增量对账(lastmod / 新 ID)。
 

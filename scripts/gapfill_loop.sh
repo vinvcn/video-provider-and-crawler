@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Batch gap fill: fetch metadata per missing catalog id through the Next data
+# route (vpc fetch-ids), ingest, report. Runs until the catalog gap is empty or
+# a batch stops producing rows. Resume-safe (state in storage/state/ids.json).
+#
+# Tunables: BATCH_IDS (2000) MAX_BATCHES (500) ORDER (lastmod|id|random)
+# Usage:  bash scripts/gapfill_loop.sh
+set -uo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO"
+
+BATCH_IDS="${BATCH_IDS:-2000}"
+MAX_BATCHES="${MAX_BATCHES:-500}"
+ORDER="${ORDER:-lastmod}"
+PROGRESS="${PROGRESS:-/tmp/opencode/gapfill-progress.log}"
+mkdir -p "$(dirname "$PROGRESS")"
+
+db() { docker exec dev-middleware-stock-db psql -U postgres -d stock -tAc "$1"; }
+log() { echo "$(date '+%F %T') $*" | tee -a "$PROGRESS"; }
+
+for i in $(seq 1 "$MAX_BATCHES"); do
+  before=$(db "SELECT count(*) FROM stock_videos")
+  gap=$(db "SELECT count(*) FROM catalog_videos c WHERE NOT EXISTS (SELECT 1 FROM stock_videos s WHERE s.pexels_id = c.pexels_id)")
+  cov=$(db "SELECT round((SELECT count(*) FROM stock_videos)*100.0/(SELECT count(*) FROM catalog_videos),2)")
+  log "batch $i start: stock=$before gap=$gap coverage=${cov}%"
+  if [ "$gap" -eq 0 ]; then
+    log "catalog gap is empty; stopping"
+    break
+  fi
+
+  batch_log="/tmp/opencode/gapfill-batch-$i.log"
+  uv run vpc fetch-ids --limit "$BATCH_IDS" --order "$ORDER" --pool 4 --retries 60 \
+    >>"$batch_log" 2>&1
+  uv run vpc ingest --kind ids --skip-thumbnails >>"$batch_log" 2>&1
+
+  after=$(db "SELECT count(*) FROM stock_videos")
+  new=$((after - before))
+  missing=$(grep -c 'status=404' "$batch_log" 2>/dev/null || true)
+  cov=$(db "SELECT round((SELECT count(*) FROM stock_videos)*100.0/(SELECT count(*) FROM catalog_videos),2)")
+  log "batch $i end: +$new rows, missing404=$missing, coverage=${cov}%"
+
+  if [ "$new" -eq 0 ]; then
+    log "no new rows this batch; stopping"
+    break
+  fi
+done
+log "LOOP-DONE"

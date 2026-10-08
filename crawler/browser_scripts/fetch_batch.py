@@ -134,6 +134,26 @@ def error_text(result):
     return str(result.get("error") or result.get("body") or "")[:300]
 
 
+def extract_attributes(payload):
+    """Pull pageProps.medium.attributes out of a Next data payload.
+
+    Mirrors crawler/nextdata.py:extract_attributes (this harness script cannot
+    import the package).
+    """
+    if not isinstance(payload, dict):
+        return None
+    props = payload.get("pageProps")
+    if not isinstance(props, dict):
+        return None
+    medium = props.get("medium")
+    if not isinstance(medium, dict):
+        return None
+    attributes = medium.get("attributes")
+    if not isinstance(attributes, dict) or "id" not in attributes:
+        return None
+    return attributes
+
+
 def ensure_tab(state):
     """Attach to our pexels.com tab, or create one; never navigate foreign tabs.
 
@@ -370,6 +390,113 @@ elif mode == "search_list":
                 "mode": mode,
                 "fetched": ok_count,
                 "ended_terms": ended_terms,
+                "total": len(targets),
+            }
+        )
+    )
+
+elif mode == "id_list":
+    # Per-video gap fill through the Next.js data route; needs a pexels page
+    # loaded so window.__NEXT_DATA__.buildId is readable.
+    template = SPEC["url_template"]
+    targets = SPEC["targets"]
+    done = set(state.get("done_keys", []))
+    pending = [t for t in targets if t["key"] not in done]
+
+    def make_url(build, target):
+        return (
+            template.replace("{build}", str(build))
+            .replace("{slug}", str(target.get("slug") or ""))
+            .replace("{id}", str(target["id"]))
+        )
+
+    def read_build_id():
+        value = evaluate(
+            "JSON.stringify(window.__NEXT_DATA__ ? window.__NEXT_DATA__.buildId : null)", None
+        )
+        return value if isinstance(value, str) else None
+
+    def wait_build_id(timeout):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            found = read_build_id()
+            if found:
+                return found
+            time.sleep(1.0)
+        return None
+
+    # A fresh context needs time to pass Cloudflare and render; a previously
+    # persisted buildId works too because the data route itself is unchallenged.
+    build_id = wait_build_id(5.0) or state.get("build_id")
+    if not build_id:
+        try:
+            cdp("Page.navigate", url="https://www.pexels.com/videos/")
+        except Exception as exc:
+            print("BUILD-NAV-FAIL %s" % exc)
+        build_id = wait_build_id(30.0)
+    if not build_id:
+        print("BUILD-MISSING no __NEXT_DATA__.buildId (challenge not passed?)")
+        raise SystemExit(1)
+    state["build_id"] = build_id
+    save_state(state)
+    print("BUILD %s" % build_id)
+
+    ok_count = 0
+    missing = 0
+    fail_streak = 0
+    for start in range(0, len(pending), POOL):
+        chunk = pending[start : start + POOL]
+        results = fetch_many([make_url(build_id, t) for t in chunk])
+        if all(result.get("status") == 404 for result in results):
+            # a run of 404s usually means the site rotated buildId on deploy
+            refreshed = read_build_id()
+            if refreshed and refreshed != build_id:
+                print("BUILD-REFRESH %s -> %s" % (build_id, refreshed))
+                build_id = refreshed
+                state["build_id"] = build_id
+                save_state(state)
+                results = fetch_many([make_url(build_id, t) for t in chunk])
+        for target, result in zip(chunk, results, strict=True):
+            url = make_url(build_id, target)
+            if result.get("status") != 200:
+                time.sleep(1.5)
+                result = fetch_one_retry(url)
+            status = result.get("status", 0)
+            attributes = extract_attributes(parse_body(result))
+            if attributes is None:
+                write_spool(target["key"], url, {"status": status, "error": error_text(result)})
+                print("ITEM-FAIL %s status=%s" % (target["key"], status))
+                if status in (401, 403, 429):
+                    state["done_keys"] = sorted(done)
+                    save_state(state)
+                    print("ABORT status=%s (auth/rate-limit)" % status)
+                    raise SystemExit(1)
+                if status == 404:
+                    # deleted or unlisted video: record it and stop retrying it
+                    missing += 1
+                    done.add(target["key"])
+                fail_streak += 1
+                if fail_streak >= 8:
+                    state["done_keys"] = sorted(done)
+                    save_state(state)
+                    print("ABORT fail-streak=%d (browser/daemon likely down)" % fail_streak)
+                    raise SystemExit(1)
+                continue
+            fail_streak = 0
+            write_spool(target["key"], url, {"status": 200, "attributes": attributes})
+            done.add(target["key"])
+            ok_count += 1
+            print("ITEM %s %s" % (target["key"], attributes.get("slug") or ""))
+        state["done_keys"] = sorted(done)
+        save_state(state)
+        time.sleep(PACE_MS / 1000.0)
+    print(
+        "SUMMARY "
+        + json.dumps(
+            {
+                "mode": mode,
+                "fetched": ok_count,
+                "missing": missing,
                 "total": len(targets),
             }
         )

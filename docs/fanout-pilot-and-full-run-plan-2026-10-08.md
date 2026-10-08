@@ -127,6 +127,13 @@ N(t) = C × (1 − e^(−480·t / C)),  C = 665,233, t = 已用词数
 2. **再按 ID 补缺口**,优先按 `catalog_videos.lastmod`(新/近期变更的先补);
 3. 这条通道同时解决**未来增量**:新 ID 或 lastmod 变化的条目可以按 ID 精准刷新。
 
+**已实现(2026-10-08):** `vpc fetch-ids --limit N [--order lastmod|id|random]` ——
+读 buildId → 拉数据路由 → 落 `spool/ids/` → `vpc ingest --kind ids`;冒烟 5 条全绿。
+
+**质量注意:** 数据路由返回的 `tags` 数明显少于列表/搜索(3–10 vs 40–50;列表用 `seo_tags=true`)。
+补全后建议挑选 tags 偏少的行做一次定向刷新(先验证数据路由是否接受 `seo_tags`)。
+
+## 10. 复现
 
 ```bash
 # 单批
