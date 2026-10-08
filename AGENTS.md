@@ -19,7 +19,7 @@ tests/                  # 单元测试
 ## 3. 环境事实
 
 - 本机:Python 3.11 + uv;Docker;无 GPU;`storage/` 在 NVMe 上
-- stock-db:`pgvector/pgvector:pg16` 容器,`127.0.0.1:15433`,库名/用户 `postgres`
+- stock-db:`pgvector/pgvector:pg16` 容器,`127.0.0.1:15433`,库名/用户 `postgres`;由共享中间件基建 `$HOME/infrastructure/middleware/dev` 提供,环境相关信息见本仓库 `docker-compose.yml` 顶部说明与 `ENV.md`
 - 爬取依赖 `browser-use` CLI(本机已装);爬虫用**匿名专用 browser context**,不得使用个人 Chrome profile 的登录态
 - **Python 网络必须走环境代理**(localhost:7897):本机 Python 直连 pexels CDN 会 TLS 超时(curl 直连可用,Python 不行)。httpx 默认 `trust_env=True`;`VPC_USE_PROXY=0` 可强制直连
 - `secret-key` 请求头是 Pexels 前端公开常量(非个人凭证),默认值在 `crawler/pexels_v3.py`,可用 `VPC_PEXELS_SECRET` 覆盖;不要提交任何**个人** API key

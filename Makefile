@@ -20,10 +20,11 @@ fmt:
 	uv run ruff format .
 
 up:
-	docker compose up -d stock-db
+	@echo "stock-db 已由共享中间件基建 $(HOME)/infrastructure/middleware/dev 提供（见 docker-compose.yml 顶部说明）"
+	docker compose --project-directory $(HOME)/infrastructure/middleware/dev --env-file $(HOME)/infrastructure/middleware/dev/.env -f $(HOME)/infrastructure/middleware/dev/compose.yaml up -d stock-db
 
 down:
-	docker compose down
+	docker compose --project-directory $(HOME)/infrastructure/middleware/dev --env-file $(HOME)/infrastructure/middleware/dev/.env -f $(HOME)/infrastructure/middleware/dev/compose.yaml stop stock-db
 
 migrate:
 	uv run vpc migrate
