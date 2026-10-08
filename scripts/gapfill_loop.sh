@@ -21,9 +21,10 @@ db() { docker exec dev-middleware-stock-db psql -U postgres -d stock -tAc "$1"; 
 log() { echo "$(date '+%F %T') $*" | tee -a "$PROGRESS"; }
 
 attempted=0
+zero_streak=0
 for i in $(seq 1 "$MAX_BATCHES"); do
   before=$(db "SELECT count(*) FROM stock_videos")
-  gap=$(db "SELECT count(*) FROM catalog_videos c WHERE NOT EXISTS (SELECT 1 FROM stock_videos s WHERE s.pexels_id = c.pexels_id)")
+  gap=$(db "SELECT count(*) FROM catalog_videos c WHERE c.missing_since IS NULL AND NOT EXISTS (SELECT 1 FROM stock_videos s WHERE s.pexels_id = c.pexels_id)")
   cov=$(db "SELECT round((SELECT count(*) FROM stock_videos)*100.0/(SELECT count(*) FROM catalog_videos),2)")
   log "batch $i start: stock=$before gap=$gap coverage=${cov}% attempted=$attempted"
   if [ "$gap" -eq 0 ]; then
@@ -49,13 +50,19 @@ for i in $(seq 1 "$MAX_BATCHES"); do
 
   after=$(db "SELECT count(*) FROM stock_videos")
   new=$((after - before))
-  missing=$(grep -c 'status=404' "$batch_log" 2>/dev/null || true)
+  missing=$(grep -cE 'ITEM-MISS|status=404' "$batch_log" 2>/dev/null || true)
   cov=$(db "SELECT round((SELECT count(*) FROM stock_videos)*100.0/(SELECT count(*) FROM catalog_videos),2)")
-  log "batch $i end: +$new rows, missing404=$missing, attempted=$attempted/${MAX_IDS:-∞}, coverage=${cov}%"
+  log "batch $i end: +$new rows, missing=$missing, attempted=$attempted/${MAX_IDS:-∞}, coverage=${cov}%"
 
   if [ "$new" -eq 0 ]; then
-    log "no new rows this batch; stopping"
-    break
+    zero_streak=$((zero_streak + 1))
+    if [ "$zero_streak" -ge 3 ]; then
+      log "no new rows for $zero_streak consecutive batches; stopping"
+      break
+    fi
+    log "no new rows this batch (#$zero_streak); continuing (deleted ids get marked)"
+  else
+    zero_streak=0
   fi
 done
 log "LOOP-DONE"

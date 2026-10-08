@@ -216,11 +216,31 @@ def catalog_gap(
     sql = f"""
         SELECT c.pexels_id, c.slug
         FROM catalog_videos c
-        WHERE NOT EXISTS (SELECT 1 FROM stock_videos s WHERE s.pexels_id = c.pexels_id)
+        WHERE c.missing_since IS NULL
+          AND NOT EXISTS (SELECT 1 FROM stock_videos s WHERE s.pexels_id = c.pexels_id)
         ORDER BY {clause}
         LIMIT %s
     """
     return [(int(row[0]), row[1]) for row in conn.execute(sql, (limit,)).fetchall()]
+
+
+def mark_catalog_missing(conn: psycopg.Connection, pexels_ids: Iterable[int]) -> int:
+    """Flag catalog rows whose video is gone (deleted/unlisted); returns newly marked."""
+    ids = list(pexels_ids)
+    if not ids:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE catalog_videos
+            SET missing_since = NOW()
+            WHERE pexels_id = ANY(%s) AND missing_since IS NULL
+            """,
+            (ids,),
+        )
+        marked = cur.rowcount
+    conn.commit()
+    return marked
 
 
 def stats(conn: psycopg.Connection) -> dict[str, Any]:

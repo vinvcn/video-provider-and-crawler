@@ -20,6 +20,7 @@ from crawler.spool import (
     iter_records,
     load_ingest_marks,
     record_attributes,
+    record_missing_id,
     save_ingest_marks,
     term_slug,
 )
@@ -157,19 +158,28 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         run_started_ns = time.time_ns()
         touched: set[str] = set()
         pending: list[dict] = []
+        missing: list[int] = []
+        missing_marks = 0
         for record in iter_records(args.kind, since_ns=None if args.full else marks):
             seen += 1
             touched.add(Path(record["_path"]).parent.name)
+            gone_id = record_missing_id(record)
+            if gone_id is not None:
+                missing.append(gone_id)
             attributes = record_attributes(record)
             if not attributes:
                 skipped += 1
-                continue
-            for attrs in attributes:
-                pending.append(normalize_video(attrs))
+            else:
+                for attrs in attributes:
+                    pending.append(normalize_video(attrs))
             if len(pending) >= args.batch:
                 upserted += db.upsert_videos(conn, pending)
                 pending = []
+            if len(missing) >= args.batch:
+                missing_marks += db.mark_catalog_missing(conn, missing)
+                missing = []
         upserted += db.upsert_videos(conn, pending)
+        missing_marks += db.mark_catalog_missing(conn, missing)
         if not args.full:
             # Floors advance only after a completed pass, so a crash mid-run
             # replays the unprocessed files on the next run (upserts are idempotent).
@@ -180,6 +190,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             "records": seen,
             "upserted": upserted,
             "skipped": skipped,
+            "catalog_missing_marked": missing_marks,
             "mode": "full" if args.full else "incremental",
             "kinds": sorted(touched),
         }

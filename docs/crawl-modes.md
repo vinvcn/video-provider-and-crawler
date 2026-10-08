@@ -46,6 +46,11 @@ spec 通过临时文件传递;不下载视频、不使用官方 API key。
 - `buildId`:优先读当前页面的 `window.__NEXT_DATA__.buildId`(读不到就导航一次并轮询),
   成功后持久化到 `state/ids.json`;站点发版后若整批 404 会自动重读(`BUILD-REFRESH`)。
 - 404 视为已删除/未收录:写 spool 记录并标记完成,不再重试(计入 `missing`)。
+- 已删除/下架视频另有精确信号:数据路由返回 **HTTP 200 + `pageProps.__N_REDIRECT`
+  指向 `/search/...?missing_medium`**(没有 `pageProps.medium`)。抓取器把它记为
+  `{"status":200,"not_found":true,...}`,且**不**计入 fail-streak;`vpc ingest --kind ids`
+  会把对应 `catalog_videos.missing_since` 标上,gap 查询从此跳过,批次不会被死 ID 堵住
+  (2026-10-09 队列头卡死事故的修复)。
 - spool 记录形如 `{"status":200,"attributes":{…}}`(与列表项同构);`vpc ingest --kind ids` 兼容。
 - 速率:约 1 请求/视频、~85KB;pool 4 起步。
 - 已知差异:数据路由返回的 `tags` 比列表/搜索少(3–10 vs 40–50,后者用了 `seo_tags=true`)——

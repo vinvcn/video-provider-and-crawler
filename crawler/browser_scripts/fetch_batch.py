@@ -134,6 +134,15 @@ def error_text(result):
     return str(result.get("error") or result.get("body") or "")[:300]
 
 
+CHALLENGE_MARKERS = ("Just a moment", "challenges.cloudflare.com", "cf-chl")
+
+
+def is_challenge(result):
+    """True when a body is a Cloudflare challenge rather than site content."""
+    text = str(result.get("body") or result.get("error") or "")
+    return any(marker in text for marker in CHALLENGE_MARKERS)
+
+
 def extract_attributes(payload):
     """Pull pageProps.medium.attributes out of a Next data payload.
 
@@ -152,6 +161,21 @@ def extract_attributes(payload):
     if not isinstance(attributes, dict) or "id" not in attributes:
         return None
     return attributes
+
+
+def is_missing_medium(payload):
+    """True when the data route redirects to /search/...?missing_medium.
+
+    Deleted or unlisted videos answer with HTTP 200 and this redirect instead
+    of a `pageProps.medium` payload.
+    """
+    if not isinstance(payload, dict):
+        return False
+    props = payload.get("pageProps")
+    if not isinstance(props, dict):
+        return False
+    redirect = props.get("__N_REDIRECT")
+    return isinstance(redirect, str) and "missing_medium" in redirect
 
 
 def ensure_tab(state):
@@ -198,6 +222,7 @@ context_id, target_id = ensure_tab(state)
 state["browser_context_id"] = context_id
 state["target_id"] = target_id
 save_state(state)
+
 
 def to_ts(value):
     try:
@@ -425,16 +450,23 @@ elif mode == "id_list":
             time.sleep(1.0)
         return None
 
-    # A fresh context needs time to pass Cloudflare and render; a previously
-    # persisted buildId works too because the data route itself is unchallenged.
-    build_id = wait_build_id(5.0) or state.get("build_id")
+    # A fresh context needs time to pass Cloudflare and render. Do not fall back
+    # to a persisted buildId while the page is still challenged: in-page fetches
+    # issued from a challenge page are challenged too (403 "Just a moment"),
+    # which killed the 2026-10-09 probe run.
+    build_id = wait_build_id(5.0)
     if not build_id:
         try:
             cdp("Page.navigate", url="https://www.pexels.com/videos/")
         except Exception as exc:
             print("BUILD-NAV-FAIL %s" % exc)
-        build_id = wait_build_id(30.0)
+        build_id = wait_build_id(45.0)
     if not build_id:
+        # the page never rendered: drop the (likely challenged) context so the
+        # next attempt starts a fresh one
+        state.pop("browser_context_id", None)
+        state.pop("target_id", None)
+        save_state(state)
         print("BUILD-MISSING no __NEXT_DATA__.buildId (challenge not passed?)")
         raise SystemExit(1)
     state["build_id"] = build_id
@@ -462,19 +494,34 @@ elif mode == "id_list":
                 time.sleep(1.5)
                 result = fetch_one_retry(url)
             status = result.get("status", 0)
-            attributes = extract_attributes(parse_body(result))
+            payload = parse_body(result)
+            attributes = extract_attributes(payload)
             if attributes is None:
+                if status == 404 or is_missing_medium(payload):
+                    # deleted or unlisted video: record it and stop retrying it
+                    missing += 1
+                    write_spool(
+                        target["key"],
+                        url,
+                        {"status": status, "not_found": True, "error": error_text(result)},
+                    )
+                    print("ITEM-MISS %s status=%s (gone)" % (target["key"], status))
+                    done.add(target["key"])
+                    fail_streak = 0
+                    continue
                 write_spool(target["key"], url, {"status": status, "error": error_text(result)})
                 print("ITEM-FAIL %s status=%s" % (target["key"], status))
                 if status in (401, 403, 429):
                     state["done_keys"] = sorted(done)
+                    if is_challenge(result):
+                        # the context is challenged: drop it so the next attempt
+                        # starts a fresh one (ensure_tab creates a new context)
+                        state.pop("browser_context_id", None)
+                        state.pop("target_id", None)
+                        print("CHALLENGE-CONTEXT dropped (fresh context next attempt)")
                     save_state(state)
-                    print("ABORT status=%s (auth/rate-limit)" % status)
+                    print("ABORT status=%s (auth/rate-limit or challenge)" % status)
                     raise SystemExit(1)
-                if status == 404:
-                    # deleted or unlisted video: record it and stop retrying it
-                    missing += 1
-                    done.add(target["key"])
                 fail_streak += 1
                 if fail_streak >= 8:
                     state["done_keys"] = sorted(done)
