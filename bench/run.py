@@ -69,8 +69,13 @@ def run_strategy(
         "embed": (
             {
                 "model": embed_client.config.model,
-                "dim": embed_client.config.dim,
+                "dim": getattr(strategy, "dim_effective", None) or embed_client.config.dim,
                 "materials_tokens": _materials_cache_tokens(root, materials, embed_client),
+                "materials_tokens_spent": int(getattr(strategy, "materials_tokens_spent", 0)),
+                "query_tokens": max(
+                    0,
+                    embed_client.total_tokens - int(getattr(strategy, "materials_tokens_spent", 0)),
+                ),
             }
             if embed_client is not None
             else None

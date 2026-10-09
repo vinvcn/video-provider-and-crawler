@@ -84,9 +84,6 @@ def cmd_run(args: argparse.Namespace) -> int:
         embed_client=embed_client,
     )
     if embed_client is not None:
-        manifest["embed"]["query_tokens"] = max(
-            0, embed_client.total_tokens - int(manifest["embed"]["materials_tokens"])
-        )
         embed_client.close()
     manifest["out_dir"] = str(root / "runs" / manifest["run_id"])
     print(json.dumps(manifest, ensure_ascii=False, indent=2))

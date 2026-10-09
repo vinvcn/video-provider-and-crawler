@@ -223,6 +223,7 @@ def build_api_dense(materials: Materials, client: EmbeddingClient, root: Path) -
     doc_ids = list(materials.ids)
     cache_dir = _embeddings_cache_dir(root, client.config.model, client.config.dim, materials)
     vectors_path = cache_dir / "vectors.npy"
+    tokens_before = client.total_tokens
     if not vectors_path.is_file():
         texts = [materials.rows[doc_id].embed_text for doc_id in doc_ids]
         client.total_tokens = 0
@@ -234,15 +235,21 @@ def build_api_dense(materials: Materials, client: EmbeddingClient, root: Path) -
             {
                 "model": client.config.model,
                 "dim": client.config.dim,
+                "dim_effective": int(len(vectors[0])),
                 "materials_version": materials.version,
                 "materials_hash": materials.content_hash,
                 "tokens": client.total_tokens,
             },
         )
     matrix = _normalize_rows(np.load(vectors_path).astype(np.float32))
-    return DenseStrategy(
+    strategy = DenseStrategy(
         "dense", materials, matrix, ApiQueryEmbedder(client, client.config.query_prefix)
     )
+    # Cost accounting: what this run actually spent on the materials side
+    # (0 on a cache hit), plus the effective dimension of the cached matrix.
+    strategy.materials_tokens_spent = client.total_tokens - tokens_before  # type: ignore[attr-defined]
+    strategy.dim_effective = int(matrix.shape[1])  # type: ignore[attr-defined]
+    return strategy
 
 
 def build_strategy(
@@ -265,7 +272,10 @@ def build_strategy(
         raise SystemExit("strategy 'rrf' needs an embeddings endpoint (.env VPC_EMBED_*)")
     bm25 = Bm25Strategy("bm25-query", materials, idf_side="query")
     dense = build_api_dense(materials, embed_client, root)
-    return RrfStrategy("rrf", [bm25, dense])
+    rrf = RrfStrategy("rrf", [bm25, dense])
+    rrf.materials_tokens_spent = getattr(dense, "materials_tokens_spent", 0)  # type: ignore[attr-defined]
+    rrf.dim_effective = getattr(dense, "dim_effective", None)  # type: ignore[attr-defined]
+    return rrf
 
 
 def strategy_config(spec_id: str, embed_client: EmbeddingClient | None) -> dict:
