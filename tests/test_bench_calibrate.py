@@ -60,6 +60,35 @@ def test_export_is_stratified_and_deterministic(bench_root: Path):
     assert counts == {"0": 10, "1": 15, "2": 5, "3": 5}
 
 
+def test_blind_export_hides_judge_columns(bench_root: Path):
+    _write_labels(bench_root / "judgments" / "labels.jsonl", [0] * 5 + [3] * 5)
+    outcome = calibrate.export_worksheet(bench_root, "mock@prompt-v1", blind=True)
+    assert outcome["blind"] is True
+    text = Path(outcome["path"]).read_text(encoding="utf-8")
+    header = text.splitlines()[0]
+    assert header == "pair_id,query_text,doc_id,doc_text,human_grade,notes"
+    assert "judge" not in header
+
+
+def test_blind_worksheet_scores_by_pair_id(bench_root: Path):
+    _write_labels(bench_root / "judgments" / "labels.jsonl", [0] * 5 + [3] * 5)
+    outcome = calibrate.export_worksheet(bench_root, "mock@prompt-v1", blind=True)
+    worksheet = Path(outcome["path"])
+    lines = worksheet.read_text(encoding="utf-8").splitlines()
+    header = lines[0].split(",")
+    human_col = header.index("human_grade")
+    filled = []
+    for line in lines[1:]:
+        cells = line.split(",")
+        cells[human_col] = "1"  # uniform human grades; judge grades come from the store
+        filled.append(",".join(cells))
+    worksheet.write_text("\n".join([lines[0], *filled]) + "\n", encoding="utf-8")
+
+    report = calibrate.score_worksheet(bench_root, "mock@prompt-v1", worksheet)
+    assert report["n_graded"] == 10
+    assert report["n_skipped"] == 0
+
+
 def test_export_when_grades_are_scarce(bench_root: Path):
     _write_labels(bench_root / "judgments" / "labels.jsonl", [1, 1, 2])
     outcome = calibrate.export_worksheet(bench_root, "mock@prompt-v1")

@@ -32,10 +32,18 @@ WORKSHEET_COLUMNS = (
     "human_grade",
     "notes",
 )
+BLIND_COLUMNS = ("pair_id", "query_text", "doc_id", "doc_text", "human_grade", "notes")
 
 
-def export_worksheet(root: Path, judge_version: str, out_path: Path | None = None) -> dict:
-    """Write the calibration CSV; returns counts per grade + the path."""
+def export_worksheet(
+    root: Path, judge_version: str, out_path: Path | None = None, blind: bool = False
+) -> dict:
+    """Write the calibration CSV; returns counts per grade + the path.
+
+    `blind=True` drops the judge grade/reason columns so the human grades
+    without anchoring (kappa stays meaningful); the scorer joins the judge
+    grades back by pair_id either way.
+    """
     records = [
         record
         for record in label_records(root / "judgments" / "labels.jsonl", judge_version)
@@ -53,10 +61,13 @@ def export_worksheet(root: Path, judge_version: str, out_path: Path | None = Non
         )
         picked.extend(ordered[: GRADE_QUOTA[grade]])
 
-    path = out_path or (root / "reports" / "calibration-worksheet.csv")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(WORKSHEET_COLUMNS))
+    if out_path is None:
+        name = "calibration-worksheet-blind.csv" if blind else "calibration-worksheet.csv"
+        out_path = root / "reports" / name
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    columns = BLIND_COLUMNS if blind else WORKSHEET_COLUMNS
+    with out_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(columns), extrasaction="ignore")
         writer.writeheader()
         for record in sorted(picked, key=lambda record: record["key"]):
             writer.writerow(
@@ -72,8 +83,9 @@ def export_worksheet(root: Path, judge_version: str, out_path: Path | None = Non
                 }
             )
     return {
-        "path": path,
+        "path": out_path,
         "picked": len(picked),
+        "blind": blind,
         "available": Counter({g: len(v) for g, v in by_grade.items()}),
     }
 

@@ -189,13 +189,14 @@ def cmd_leaderboard(args: argparse.Namespace) -> int:
 def cmd_calibrate_export(args: argparse.Namespace) -> int:
     root = _prepare()
     judge_version = _judge_version_arg(root, args.judge)
-    outcome = calibrate.export_worksheet(root, judge_version)
+    outcome = calibrate.export_worksheet(root, judge_version, blind=args.blind)
     print(
         json.dumps(
             {
                 "judge_version": judge_version,
                 "path": str(outcome["path"]),
                 "picked": outcome["picked"],
+                "blind": outcome["blind"],
                 "available": {str(k): v for k, v in outcome["available"].items()},
             },
             ensure_ascii=False,
@@ -371,6 +372,11 @@ def register(sub: argparse._SubParsersAction) -> None:  # noqa: SLF001
     calibrate_sub = calibrate_parser.add_subparsers(dest="calibrate_command", required=True)
     cexport = calibrate_sub.add_parser("export", help="write the human worksheet")
     cexport.add_argument("--judge", default="latest")
+    cexport.add_argument(
+        "--blind",
+        action="store_true",
+        help="hide judge grade/reason columns so the human grades blind",
+    )
     cexport.set_defaults(func=cmd_calibrate_export)
     cscore = calibrate_sub.add_parser("score", help="score a filled worksheet (kappa report)")
     cscore.add_argument("--worksheet", required=True)
