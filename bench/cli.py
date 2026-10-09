@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 from bench import calibrate, env, scoring, strategies
+from bench import export as export_mod
 from bench import judge as judge_mod
 from bench import leaderboard as leaderboard_mod
 from bench import materials as materials_mod
@@ -220,6 +221,14 @@ def cmd_calibrate_score(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_export(args: argparse.Namespace) -> int:
+    root = _prepare()
+    judge_version = _judge_version_arg(root, args.judge)
+    summary = export_mod.export_all(root, args.materials, args.queries, judge_version)
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_smoke(args: argparse.Namespace) -> int:
     _prepare()
     result: dict[str, object] = {}
@@ -320,6 +329,12 @@ def register(sub: argparse._SubParsersAction) -> None:  # noqa: SLF001
     board.add_argument("--judge", default="latest")
     board.add_argument("--split", choices=["holdout", "train", "all"], default="holdout")
     board.set_defaults(func=cmd_leaderboard)
+
+    export = bench_sub.add_parser("export", help="flat CSV exports: queries, judgments, run hits")
+    export.add_argument("--materials", default="v1")
+    export.add_argument("--queries", default="v1")
+    export.add_argument("--judge", default="latest")
+    export.set_defaults(func=cmd_export)
 
     calibrate_parser = bench_sub.add_parser("calibrate", help="human calibration loop")
     calibrate_sub = calibrate_parser.add_subparsers(dest="calibrate_command", required=True)
