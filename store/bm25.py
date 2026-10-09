@@ -23,6 +23,12 @@ from store.embedding import EmbeddingSpec, tokenize
 DEFAULT_K1 = 1.2
 DEFAULT_B = 0.75
 
+# Where the idf factor lives in the sparse dot product (docs/bench-harness-design-2026-10-09.md §4):
+#   "both"  — legacy behaviour: doc and query sides both carry idf -> dot = idf^2 * tf_sat
+#   "query" — textbook BM25: doc side is tf_sat only, query side carries idf -> dot = idf * tf_sat
+#   "doc"   — same textbook product with idf on the document side instead (query weight 1)
+IDF_SIDES = ("both", "query", "doc")
+
 
 @dataclass
 class Bm25Model:
@@ -30,10 +36,15 @@ class Bm25Model:
 
     k1: float = DEFAULT_K1
     b: float = DEFAULT_B
+    idf_side: str = "both"
     term_ids: dict[str, int] = field(default_factory=dict)
     df: dict[str, int] = field(default_factory=dict)
     n_docs: int = 0
     total_len: int = 0
+
+    def __post_init__(self) -> None:
+        if self.idf_side not in IDF_SIDES:
+            raise ValueError(f"unknown idf_side: {self.idf_side!r} (expected one of {IDF_SIDES})")
 
     @property
     def avg_len(self) -> float:
@@ -61,29 +72,41 @@ class Bm25Model:
         return math.log(1.0 + (self.n_docs - df + 0.5) / (df + 0.5))
 
     def doc_weights(self, text: str) -> dict[int, float]:
-        """BM25 term weights for one document (corpus side)."""
+        """BM25 term weights for one document (corpus side).
+
+        With idf_side="query" the document side carries the saturating tf factor
+        only, so the dot product with the query-side idf weights equals the
+        textbook BM25 score.
+        """
         tokens = tokenize(text)
         length = len(tokens)
         if not length:
             return {}
-        norm = self.k1 * (
-            1.0 - self.b + self.b * (length / self.avg_len if self.avg_len else 1.0)
-        )
+        norm = self.k1 * (1.0 - self.b + self.b * (length / self.avg_len if self.avg_len else 1.0))
         weights: dict[int, float] = {}
         for term, tf in Counter(tokens).items():
             term_id = self.term_ids.get(term)
             if term_id is None:
                 continue
-            weights[term_id] = self.idf(term) * (tf * (self.k1 + 1.0)) / (tf + norm)
+            weight = (tf * (self.k1 + 1.0)) / (tf + norm)
+            if self.idf_side != "query":
+                weight *= self.idf(term)
+            weights[term_id] = weight
         return weights
 
     def query_weights(self, text: str) -> dict[int, float]:
-        """Query-side weights: idf per distinct term (dot product with doc side)."""
+        """Query-side weights (dot product with doc side).
+
+        "both"/"query" carry idf per distinct term; "doc" carries plain 1.0 so
+        the idf factor comes from the document side only. Terms are processed
+        in sorted order so score accumulation is reproducible across processes
+        (string-set iteration order is hash-seed dependent).
+        """
         weights: dict[int, float] = {}
-        for term in set(tokenize(text)):
+        for term in sorted(set(tokenize(text))):
             term_id = self.term_ids.get(term)
             if term_id is not None:
-                weights[term_id] = self.idf(term)
+                weights[term_id] = self.idf(term) if self.idf_side != "doc" else 1.0
         return weights
 
     def save(self, path: Path) -> None:
@@ -94,6 +117,7 @@ class Bm25Model:
                 {
                     "k1": self.k1,
                     "b": self.b,
+                    "idf_side": self.idf_side,
                     "n_docs": self.n_docs,
                     "total_len": self.total_len,
                     "term_ids": self.term_ids,
@@ -110,6 +134,7 @@ class Bm25Model:
         return cls(
             k1=data["k1"],
             b=data["b"],
+            idf_side=data.get("idf_side", "both"),
             n_docs=data["n_docs"],
             total_len=data["total_len"],
             term_ids={str(k): int(v) for k, v in data["term_ids"].items()},
