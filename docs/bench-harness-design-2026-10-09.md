@@ -140,3 +140,19 @@ vpc bench smoke                      # 判分/嵌入连通性冒烟(读 .env)
 4. 排行榜 md/csv/summary 落盘,主榜 holdout nDCG@10,附成对 CI;
 5. 产出结论:bm25-both vs bm25-query(D4)、dense vs bm25(D1)、中文探针(CJK)、
    硬过滤切分表现;人工校准一致率入报告。
+
+## 9. 实跑纪要(2026-10-09,首版基线执行时)
+
+外部端点由用户提供(`.scratch/model_provider.md`,钥匙只入 gitignored `.env`):
+
+- **判分**:`deepseek-ai/deepseek-v4.1-flash` @ NVIDIA integrate(OpenAI 兼容)。
+  实测**单次调用 ~45–50s**(免费端点排队型;`chat_template_kwargs.thinking=false`
+  可关推理但延迟不变 → 慢在服务侧)。免费 tier **RPM 40** → 判分器加了
+  线程共享 Pacer(`VPC_JUDGE_RPM` / `--rpm`),并发只重叠延迟、起点间隔钉死;
+  实测并发 24 路 58.8s 全 200,线性扩展。
+- **嵌入**:`BAAI/bge-m3` @ SiliconFlow(L0:RPM 2000 / TPM 500k),**1024 维**
+  (生产列的 768 维 D1 候选 `text-embedding-v4` 未提供 → 本次 dense 臂实测的是
+  **D5:BGE-M3**,同样过评测门,维度由 harness 记录,不影响比较方法)。
+  材料侧 10k 行 ≈ **1.94M tokens**,批量 16,约 2 分钟;缓存命中后 rrf 臂零重嵌。
+- **五臂池**:8,615 对(~57/查询,臂间重叠吸收了上限),判分全量 ≈ 4 小时 @ 36 RPM。
+- bge-m3 材料向量缓存产物:`storage/bench/embeddings/BAAI_bge-m3-na-<材料哈希>/`。
