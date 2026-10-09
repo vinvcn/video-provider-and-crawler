@@ -41,18 +41,22 @@ def test_record_attributes_ignores_failures_and_unknown_shapes():
     assert record_attributes({"body": {"data": "nope"}}) == []
 
 
-def test_record_missing_id_reads_flags_redirect_and_keys():
-    assert record_missing_id({"key": "id-7", "not_found": True}) == 7
-    assert record_missing_id({"key": "id-8", "status": 404}) == 8
+def test_record_missing_id_only_trusts_missing_medium():
     assert (
         record_missing_id(
             {"key": "id-9", "error": '{"__N_REDIRECT":"/search/videos/x/?missing_medium"}'}
         )
         == 9
     )
+    # A bare 404 or not_found flag can come from a rotated buildId: not proof.
+    assert record_missing_id({"key": "id-7", "not_found": True}) is None
+    assert record_missing_id({"key": "id-8", "status": 404}) is None
     assert record_missing_id({"key": "id-10", "status": 200, "error": "boom"}) is None
-    assert record_missing_id({"key": "id-11", "not_found": True, "attributes": {"id": 1}}) is None
-    assert record_missing_id({"key": "search-x-p1", "not_found": True}) is None
+    assert (
+        record_missing_id({"key": "id-11", "error": "missing_medium", "attributes": {"id": 1}})
+        is None
+    )
+    assert record_missing_id({"key": "search-x-p1", "error": "missing_medium"}) is None
 
 
 def test_term_slug_basic():

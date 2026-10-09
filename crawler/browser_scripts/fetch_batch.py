@@ -480,8 +480,15 @@ elif mode == "id_list":
         chunk = pending[start : start + POOL]
         results = fetch_many([make_url(build_id, t) for t in chunk])
         if all(result.get("status") == 404 for result in results):
-            # a run of 404s usually means the site rotated buildId on deploy
-            refreshed = read_build_id()
+            # A run of 404s usually means the site rotated buildId on deploy,
+            # but the tab still holds the stale id — reload before re-reading.
+            # These 404s must never mean "video gone": under a stale buildId
+            # every url 404s (2026-10-10 false-missing incident).
+            try:
+                cdp("Page.navigate", url="https://www.pexels.com/videos/")
+            except Exception as exc:
+                print("BUILD-NAV-FAIL %s" % exc)
+            refreshed = wait_build_id(20.0)
             if refreshed and refreshed != build_id:
                 print("BUILD-REFRESH %s -> %s" % (build_id, refreshed))
                 build_id = refreshed
@@ -497,8 +504,11 @@ elif mode == "id_list":
             payload = parse_body(result)
             attributes = extract_attributes(payload)
             if attributes is None:
-                if status == 404 or is_missing_medium(payload):
-                    # deleted or unlisted video: record it and stop retrying it
+                if is_missing_medium(payload):
+                    # deleted or unlisted video (the data route redirects to
+                    # /search/...?missing_medium): record it, never retry it.
+                    # Only this signal counts — a bare 404 can also mean a
+                    # rotated buildId, which would mislabel live videos.
                     missing += 1
                     write_spool(
                         target["key"],

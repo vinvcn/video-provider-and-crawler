@@ -65,21 +65,18 @@ _MISSING_KEY_RE = re.compile(r"^id-(\d+)$")
 def record_missing_id(record: dict[str, Any]) -> int | None:
     """Pexels id for an id-kind record that says the video is gone.
 
-    Covers the explicit `not_found` flag, a 404 status, and the data route's
-    `missing_medium` redirect (deleted/unlisted videos). Records that carry
-    attributes are successes and never count as missing.
+    Only the data route's `missing_medium` redirect proves a video is gone; a
+    bare 404 can also mean a rotated buildId, which once mislabeled thousands
+    of live videos (2026-10-10 incident). Records with attributes are successes.
     """
     if "attributes" in record:
         return None
     match = _MISSING_KEY_RE.match(str(record.get("key") or ""))
     if not match:
         return None
-    gone = (
-        record.get("not_found") is True
-        or record.get("status") == 404
-        or "missing_medium" in str(record.get("error") or "")
-    )
-    return int(match.group(1)) if gone else None
+    if "missing_medium" not in str(record.get("error") or ""):
+        return None
+    return int(match.group(1))
 
 
 def iter_records(
