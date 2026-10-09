@@ -43,3 +43,6 @@ select = ["E", "F", "I", "W", "UP", "B"]
 # Harness script: runs under `browser-use`, which pre-injects cdp/switch_tab,
 # and uses %-formatting for JS template literals ({} would clash with JS braces).
 "crawler/browser_scripts/*.py" = ["F821", "UP031"]
+# The report page is one embedded HTML/CSS/JS template; long lines are the
+# template's, not the Python code's.
+"bench/report_page.py" = ["E501"]

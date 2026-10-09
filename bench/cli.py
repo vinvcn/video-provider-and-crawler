@@ -12,7 +12,7 @@ import json
 import sys
 from pathlib import Path
 
-from bench import calibrate, env, scoring, strategies
+from bench import calibrate, env, report_page, scoring, strategies
 from bench import export as export_mod
 from bench import judge as judge_mod
 from bench import leaderboard as leaderboard_mod
@@ -221,6 +221,28 @@ def cmd_calibrate_score(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_report(args: argparse.Namespace) -> int:
+    root = _prepare()
+    materials = _load_version(root, "materials", args.materials, Materials)
+    queries = _load_version(root, "queries", args.queries, QuerySet)
+    judge_version = _judge_version_arg(root, args.judge)
+    path = report_page.build_report(root, materials, queries, judge_version, split=args.split)
+    size_mb = path.stat().st_size / 1e6
+    print(
+        json.dumps(
+            {
+                "judge_version": judge_version,
+                "split": args.split,
+                "path": str(path),
+                "size_mb": round(size_mb, 2),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0
+
+
 def cmd_export(args: argparse.Namespace) -> int:
     root = _prepare()
     judge_version = _judge_version_arg(root, args.judge)
@@ -335,6 +357,15 @@ def register(sub: argparse._SubParsersAction) -> None:  # noqa: SLF001
     export.add_argument("--queries", default="v1")
     export.add_argument("--judge", default="latest")
     export.set_defaults(func=cmd_export)
+
+    report = bench_sub.add_parser(
+        "report", help="self-contained HTML report: leaderboard + data browser"
+    )
+    report.add_argument("--materials", default="v1")
+    report.add_argument("--queries", default="v1")
+    report.add_argument("--judge", default="latest")
+    report.add_argument("--split", choices=["holdout", "train", "all"], default="holdout")
+    report.set_defaults(func=cmd_report)
 
     calibrate_parser = bench_sub.add_parser("calibrate", help="human calibration loop")
     calibrate_sub = calibrate_parser.add_subparsers(dest="calibrate_command", required=True)
