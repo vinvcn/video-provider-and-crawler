@@ -184,21 +184,18 @@ class RrfStrategy:
         self.arms = arms
 
     def search(self, query_text: str, k: int, hard: dict) -> SearchResult:
-        started = time.perf_counter()
         depth = max(RRF_ARM_DEPTH, k)
         fused: dict[int, float] = {}
+        search_ms = 0.0
         embed_ms = 0.0
         for arm in self.arms:
             result = arm.search(query_text, depth, hard)
+            search_ms += result.search_ms
             embed_ms += result.embed_ms
             for rank, (doc_id, _) in enumerate(result.hits, start=1):
                 fused[doc_id] = fused.get(doc_id, 0.0) + 1.0 / (RRF_K + rank)
         hits = _rank_hits(fused, k)
-        return SearchResult(
-            hits=hits,
-            search_ms=(time.perf_counter() - started) * 1000.0,
-            embed_ms=embed_ms,
-        )
+        return SearchResult(hits=hits, search_ms=search_ms, embed_ms=embed_ms)
 
 
 def build_hash_dense(materials: Materials) -> DenseStrategy:
