@@ -5,6 +5,7 @@ description = "Crawl pexels.com video metadata and build a dense+sparse hybrid i
 requires-python = ">=3.11"
 dependencies = [
     "httpx[socks]>=0.27",
+    "numpy>=1.26",
     "psycopg[binary]>=3.2",
 ]
 
@@ -22,10 +23,11 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["crawler", "store"]
+packages = ["crawler", "store", "bench"]
 
 [tool.setuptools.package-data]
 crawler = ["browser_scripts/*.py"]
+bench = ["data/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
