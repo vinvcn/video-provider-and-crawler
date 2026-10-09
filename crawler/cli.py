@@ -26,6 +26,11 @@ from crawler.spool import (
 )
 from store import db, embedding, migrate, thumbnails
 
+try:  # bench is a pure addition; the crawl CLI stays functional without it
+    from bench import cli as bench_cli
+except ImportError:  # pragma: no cover - bench needs numpy (main dependency)
+    bench_cli = None  # type: ignore[assignment]
+
 
 def _state_file(kind: str) -> Path:
     settings = load_settings()
@@ -297,6 +302,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("status", help="library + spool counters")
     p.set_defaults(func=cmd_status)
+
+    if bench_cli is not None:
+        bench_cli.register(sub)
     return parser
 
 
