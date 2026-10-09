@@ -87,10 +87,11 @@ def parse_grade(text: str) -> tuple[int | None, str]:
 
 
 class JudgeClient:
-    """OpenAI-compatible chat judge (temperature 0)."""
+    """OpenAI-compatible chat judge (temperature 0), with optional RPM pacing."""
 
-    def __init__(self, base_url: str, api_key: str, model: str) -> None:
+    def __init__(self, base_url: str, api_key: str, model: str, rpm: float = 0.0) -> None:
         self.model = model
+        self._pacer = Pacer(rpm)
         self._client = httpx.Client(
             base_url=base_url.rstrip("/"),
             headers={"Authorization": f"Bearer {api_key}"},
@@ -100,6 +101,7 @@ class JudgeClient:
 
     def grade(self, query_text: str, doc_text: str) -> str:
         """Raw model response text for one (query, document) pair."""
+        self._pacer.wait()
         response = self._client.post(
             "/chat/completions",
             json={
@@ -200,6 +202,37 @@ def pool_for_query(
     candidates = [doc_id for doc_id in all_doc_ids if doc_id not in pooled]
     negatives_picked = sorted(rng.sample(candidates, min(negatives, len(candidates))))
     return sorted(pooled) + negatives_picked
+
+
+@dataclass
+class Pacer:
+    """Enforce a minimum interval between request starts across threads.
+
+    Free-tier endpoints throttle by requests-per-minute (e.g. NVIDIA integrate
+    caps deepseek flash at RPM 40); without pacing, a 8-thread judge would
+    burn the budget on 429s. Zero (or negative) `per_minute` disables pacing.
+    """
+
+    per_minute: float = 0.0
+
+    def __post_init__(self) -> None:
+        import threading
+
+        self._min_interval = 60.0 / self.per_minute if self.per_minute > 0 else 0.0
+        self._lock = threading.Lock()
+        self._next_start = 0.0
+
+    def wait(self) -> None:
+        """Block until this request may start; spaces starts across threads."""
+        if not self._min_interval:
+            return
+        with self._lock:
+            now = time.monotonic()
+            start_at = max(self._next_start, now)
+            self._next_start = start_at + self._min_interval
+        delay = start_at - now
+        if delay > 0:
+            time.sleep(delay)
 
 
 @dataclass

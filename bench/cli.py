@@ -101,7 +101,9 @@ def cmd_judge(args: argparse.Namespace) -> int:
     client = None
     if not args.mock:
         config = env.judge_config()
-        client = judge_mod.JudgeClient(config.base_url, config.api_key, config.model)
+        client = judge_mod.JudgeClient(
+            config.base_url, config.api_key, config.model, rpm=args.rpm or config.rpm
+        )
     outcome = judge_mod.judge_runs(
         run_dirs,
         materials,
@@ -299,6 +301,12 @@ def register(sub: argparse._SubParsersAction) -> None:  # noqa: SLF001
     judge.add_argument("--negatives", type=int, default=5)
     judge.add_argument("--concurrency", type=int, default=8)
     judge.add_argument("--max-pairs", type=int, help="budget guard: stop after N new pairs")
+    judge.add_argument(
+        "--rpm",
+        type=float,
+        default=0.0,
+        help="requests/min cap (0 = VPC_JUDGE_RPM from .env, else unlimited)",
+    )
     judge.add_argument(
         "--mock", action="store_true", help="deterministic mock grading (pipeline test)"
     )

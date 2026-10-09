@@ -1,5 +1,7 @@
 """Judge: grade parsing, pooling, label cache, mock judging end-to-end."""
 
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -39,6 +41,39 @@ def test_parse_grade_out_of_range_and_garbage():
     assert parse_grade('{"grade": 4}')[0] is None
     assert parse_grade("no json at all")[0] is None
     assert parse_grade('{"grade": true}')[0] is None
+
+
+def test_pacer_spaces_request_starts():
+    from bench.judge import Pacer
+
+    pacer = Pacer(per_minute=600)  # 0.1s between starts
+    threads: list = []
+
+    def hit() -> list[float]:
+        starts: list[float] = []
+        for _ in range(3):
+            pacer.wait()
+            starts.append(time.monotonic())
+        return starts
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        for _ in range(2):
+            threads.append(pool.submit(hit))
+    starts = sorted(stamp for future in threads for stamp in future.result())
+    gaps = [b - a for a, b in zip(starts, starts[1:], strict=False)]
+    # 6 paced starts: 5 gaps, each >= ~0.1s (allow scheduler slack downward)
+    assert len(gaps) == 5
+    assert all(gap > 0.08 for gap in gaps)
+
+
+def test_pacer_disabled_when_zero():
+    from bench.judge import Pacer
+
+    pacer = Pacer(per_minute=0.0)
+    started = time.monotonic()
+    for _ in range(10):
+        pacer.wait()
+    assert time.monotonic() - started < 0.05
 
 
 def test_label_key_changes_with_every_component():

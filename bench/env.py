@@ -43,6 +43,7 @@ class JudgeConfig:
     base_url: str
     api_key: str
     model: str
+    rpm: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,7 @@ def judge_config() -> JudgeConfig:
         base_url=os.environ["VPC_JUDGE_BASE_URL"].rstrip("/"),
         api_key=os.environ["VPC_JUDGE_API_KEY"],
         model=os.environ["VPC_JUDGE_MODEL"],
+        rpm=float(os.environ.get("VPC_JUDGE_RPM", "0") or 0),
     )
 
 
