@@ -127,7 +127,10 @@ class GemmaCaptionClient:
         self.requests = 0
         self._client = httpx.Client(
             base_url=GEMMA_BASE_URL,
-            timeout=httpx.Timeout(120.0),
+            # 300s: evening queueing on the free tier can hold a request well
+            # past 120s; timing out would miscount as key failure and trigger
+            # cooldown spirals.
+            timeout=httpx.Timeout(300.0),
             trust_env=True,
             transport=transport,
         )
