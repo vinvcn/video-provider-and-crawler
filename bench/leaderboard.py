@@ -17,6 +17,7 @@ from bench.materials import Materials
 from bench.queries import QuerySet
 from bench.run import find_runs, load_run
 from bench.scoring import cut_report, score_run
+from bench.strategies import corpus_label
 
 PRIMARY = "ndcg10"
 
@@ -141,7 +142,7 @@ def render_markdown(report: dict) -> str:
             " {:.1f} | {:.1f} | {} |".format(
                 rank,
                 scored["strategy"],
-                spec.get("text_source", "raw"),
+                corpus_label(spec),
                 scored["run_id"],
                 holdout[report["primary_metric"]]["mean"],
                 full[report["primary_metric"]]["mean"],
@@ -186,9 +187,7 @@ def render_markdown(report: dict) -> str:
             cells.append(f"{cell['mean_ndcg10']:.4f} (n={cell['n']})" if cell else "—")
         spec = entry["run"]["manifest"]["spec"]
         lines.append(
-            f"| {entry['scored']['strategy']} ({spec.get('text_source', 'raw')}) | "
-            + " | ".join(cells)
-            + " |"
+            f"| {entry['scored']['strategy']} ({corpus_label(spec)}) | " + " | ".join(cells) + " |"
         )
     lines.append("")
     return "\n".join(lines)
@@ -224,7 +223,7 @@ def render_csv(report: dict) -> str:
                     rank,
                     scored["run_id"],
                     scored["strategy"],
-                    entry["run"]["manifest"]["spec"].get("text_source", "raw"),
+                    corpus_label(entry["run"]["manifest"]["spec"]),
                     scored["config_hash"][:12],
                     f"{holdout[report['primary_metric']]['mean']:.6f}",
                     f"{full[report['primary_metric']]['mean']:.6f}",

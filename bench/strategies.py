@@ -320,11 +320,14 @@ def strategy_config(
     embed_client: EmbeddingClient | None,
     text_source: str = "raw",
     captions_version: str | None = None,
+    captions_model: str | None = None,
 ) -> dict:
     """Serializable spec (recorded in run manifests; hashed into run ids)."""
     spec: dict[str, object] = {"strategy": spec_id, "text_source": text_source}
     if text_source == "caption":
         spec["captions_version"] = captions_version
+        if captions_model:
+            spec["captions_model"] = captions_model
     if spec_id in ("bm25-both", "bm25-query"):
         spec["idf_side"] = "both" if spec_id == "bm25-both" else "query"
         spec.update(BM25_DEFAULTS)
@@ -342,3 +345,11 @@ def strategy_config(
 def config_hash(spec: dict) -> str:
     """Stable hash of the resolved strategy configuration."""
     return util.content_hash(spec)
+
+
+def corpus_label(spec: dict) -> str:
+    """Human-facing corpus name: 'raw' or 'caption:<model>'."""
+    if str(spec.get("text_source", "raw")) == "raw":
+        return "raw"
+    model = str(spec.get("captions_model") or spec.get("captions_version") or "caption")
+    return f"caption:{model}"

@@ -1,5 +1,6 @@
 """Captions: key-pool rotation, response parsing, text-source resolution."""
 
+import json
 from pathlib import Path
 
 import httpx
@@ -7,7 +8,15 @@ import pytest
 from conftest import material_row, write_materials
 
 from bench import strategies
-from bench.captions import CaptionError, GemmaCaptionClient, parse_caption
+from bench.captions import (
+    DEEPSEEK_OCR_PROMPT,
+    DEEPSEEK_OCR_PROMPT_VERSION,
+    MODEL_PROMPTS,
+    CaptionError,
+    GemmaCaptionClient,
+    SiliconFlowCaptionClient,
+    parse_caption,
+)
 from bench.captions import Captions as CaptionsCorpus
 from bench.judge import Pacer
 
@@ -243,6 +252,72 @@ def test_hash_dense_over_captions(bench_root: Path):
     # empty-caption docs surface only at the tail with (near-)zero scores
     tail = arm.search("misty forest", k=2, hard={})
     assert all(doc_id in (1, 2) for doc_id, _ in tail.hits)
+
+
+def test_sf_caption_client_parses_chat_content(monkeypatch):
+    monkeypatch.setattr("bench.captions.time.sleep", lambda seconds: None)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["model"] == "deepseek-ai/DeepSeek-OCR"
+        assert any(part["type"] == "image_url" for part in body["messages"][0]["content"])
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"role": "assistant", "content": "A sunset over a forest."}}
+                ]
+            },
+        )
+
+    client = SiliconFlowCaptionClient(
+        api_key="sf-key",
+        model="deepseek-ai/DeepSeek-OCR",
+        rpm=0,
+        transport=_transport(handler),
+    )
+    assert client.prompt_version == "caption-ocr-v1"
+    assert client.caption_image(b"fake-bytes") == "A sunset over a forest."
+    client.close()
+
+
+def test_sf_caption_client_retries_rate_limits(monkeypatch):
+    monkeypatch.setattr("bench.captions.time.sleep", lambda seconds: None)
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(429, json={"error": "rate"})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    client = SiliconFlowCaptionClient(
+        api_key="sf-key", model="deepseek-ai/DeepSeek-OCR", rpm=0, transport=_transport(handler)
+    )
+    assert client.caption_image(b"fake-bytes") == "ok"
+    assert len(calls) == 2
+    client.close()
+
+
+def test_corpus_label_distinguishes_caption_models():
+    from bench.strategies import corpus_label
+
+    assert corpus_label({"strategy": "dense"}) == "raw"
+    assert corpus_label({"text_source": "caption", "captions_model": "gemma-4-26b-a4b-it"}) == (
+        "caption:gemma-4-26b-a4b-it"
+    )
+    assert (
+        corpus_label({"text_source": "caption", "captions_model": "deepseek-ai/DeepSeek-OCR"})
+        == "caption:deepseek-ai/DeepSeek-OCR"
+    )
+    # legacy specs without a recorded model fall back to the version
+    assert corpus_label({"text_source": "caption", "captions_version": "v1"}) == "caption:v1"
+
+
+def test_caption_prompt_registry_keys_are_lowercase():
+    assert "deepseek-ai/deepseek-ocr" in MODEL_PROMPTS
+    prompt, version = MODEL_PROMPTS["deepseek-ai/deepseek-ocr"]
+    assert prompt == DEEPSEEK_OCR_PROMPT and version == DEEPSEEK_OCR_PROMPT_VERSION
 
 
 def test_pacer_import_unchanged():

@@ -34,6 +34,7 @@ from bench.materials import Materials
 RULE_VERSION = "captions-v1"
 PROMPT_VERSION = "caption-v2"
 GEMMA_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
 
 # Phrasing matters: the prescriptive "You are cataloging... requirements" style made
 # gemma-4 echo the task instead of describing the image; this imperative form is the
@@ -45,6 +46,16 @@ CAPTION_PROMPT = (
 MAX_OUTPUT_TOKENS = 1024
 CAPTION_TEMPERATURE = 0.2
 MAX_ATTEMPTS_FACTOR = 2  # attempts = factor * key pool size
+
+# OCR-family models on SiliconFlow return empty on the caption phrasing; their
+# default chat mode answers short imperative descriptions instead (verified
+# 2026-10-10: 1.6s, structured, high quality).
+DEEPSEEK_OCR_PROMPT = "Describe the image in detail: subject, setting, lighting, colors, framing."
+DEEPSEEK_OCR_PROMPT_VERSION = "caption-ocr-v1"
+MODEL_PROMPTS: dict[str, tuple[str, str]] = {
+    "deepseek-ai/deepseek-ocr": (DEEPSEEK_OCR_PROMPT, DEEPSEEK_OCR_PROMPT_VERSION),
+}
+DEFAULT_SF_PROMPT = (DEEPSEEK_OCR_PROMPT, DEEPSEEK_OCR_PROMPT_VERSION)
 
 # Field markers the prompt asks for; used to cut task-echo preambles that gemma
 # sometimes prepends ("Task: Describe ... Constraints: ...") before the answer.
@@ -125,6 +136,8 @@ class GemmaCaptionClient:
         self._lock = threading.Lock()
         self._rr = 0
         self.requests = 0
+        self.prompt = CAPTION_PROMPT
+        self.prompt_version = PROMPT_VERSION
         self._client = httpx.Client(
             base_url=GEMMA_BASE_URL,
             # 300s: evening queueing on the free tier can hold a request well
@@ -251,6 +264,76 @@ class GemmaCaptionClient:
         raise CaptionError(
             f"caption failed after {len(self._keys) * MAX_ATTEMPTS_FACTOR} attempts: {last_error}"
         )
+
+
+class SiliconFlowCaptionClient:
+    """SiliconFlow vision-language captioner (OpenAI-compatible chat).
+
+    OCR-family models (DeepSeek-OCR, PaddleOCR-VL) live here; prompts are
+    selected per model — their chat modes reject the gemma caption phrasing.
+    Single key with RPM pacing; retries transient failures with backoff.
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        rpm: float,
+        base_url: str = SILICONFLOW_BASE_URL,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
+        self.model = model
+        self.prompt, self.prompt_version = MODEL_PROMPTS.get(model.lower(), DEFAULT_SF_PROMPT)
+        self._pacer = Pacer(rpm)
+        self._client = httpx.Client(
+            base_url=base_url,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=httpx.Timeout(300.0),
+            trust_env=True,
+            transport=transport,
+        )
+
+    def close(self) -> None:
+        self._client.close()
+
+    def caption_image(self, image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
+        """Caption one image via chat completions with an inline data URL."""
+        body = {
+            "model": self.model,
+            "temperature": CAPTION_TEMPERATURE,
+            "max_tokens": 400,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime_type};base64,{_b64(image_bytes)}"},
+                        },
+                        {"type": "text", "text": self.prompt},
+                    ],
+                }
+            ],
+        }
+        last_error = ""
+        for attempt in range(4):
+            self._pacer.wait()
+            try:
+                response = self._client.post("/chat/completions", json=body)
+            except httpx.HTTPError as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                time.sleep(min(2**attempt, 15))
+                continue
+            if response.status_code == 200:
+                message = response.json()["choices"][0]["message"]
+                content = str(message.get("content") or "").strip()
+                return " ".join(content.split())
+            last_error = f"HTTP {response.status_code}: {response.text[:120]}"
+            if response.status_code in (429, 500, 502, 503, 504):
+                time.sleep(min(2**attempt, 15))
+                continue
+            raise CaptionError(f"caption endpoint rejected request: {last_error}")
+        raise CaptionError(f"caption failed after 4 attempts: {last_error}")
 
 
 def _b64(data: bytes) -> str:
@@ -386,7 +469,7 @@ def build_captions(
                 "doc_id": doc_id,
                 "caption": caption,
                 "model": client.model,
-                "prompt_version": PROMPT_VERSION,
+                "prompt_version": client.prompt_version,
                 "thumb_source": thumb["source"],
                 "ts": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
             }
@@ -406,8 +489,8 @@ def build_captions(
         "n_captions": len(records),
         "n_failed": len(failed),
         "model": client.model,
-        "prompt_version": PROMPT_VERSION,
-        "prompt": CAPTION_PROMPT,
+        "prompt_version": client.prompt_version,
+        "prompt": client.prompt,
         "key_health": key_health,
         "materials_version": materials.version,
         "materials_hash": materials.content_hash,

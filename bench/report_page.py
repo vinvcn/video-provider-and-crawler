@@ -18,6 +18,7 @@ from bench.leaderboard import build_leaderboard
 from bench.materials import Materials
 from bench.queries import QuerySet
 from bench.run import find_runs, load_run
+from bench.strategies import corpus_label
 
 MAX_HITS = 50
 MAX_REASON_CHARS = 300
@@ -314,7 +315,7 @@ def build_report(
         rows.append(
             {
                 "strategy": scored["strategy"],
-                "ts": entry["run"]["manifest"]["spec"].get("text_source", "raw"),
+                "ts": corpus_label(entry["run"]["manifest"]["spec"]),
                 "run_id": scored["run_id"],
                 "holdout": split_metrics["ndcg10"]["mean"],
                 "full": scored["splits"]["all"]["ndcg10"]["mean"],
@@ -328,7 +329,7 @@ def build_report(
     rows.sort(key=lambda row: -row["holdout"])
 
     cuts = {
-        f"{entry['scored']['strategy']}·{entry['run']['manifest']['spec'].get('text_source', 'raw')}": (
+        f"{entry['scored']['strategy']}·{corpus_label(entry['run']['manifest']['spec'])}": (
             entry["cuts"].get(split, {})
         )
         for entry in report["runs"]
@@ -362,7 +363,7 @@ def build_report(
         runs.append(
             {
                 "strategy": run["manifest"]["spec"]["strategy"],
-                "ts": run["manifest"]["spec"].get("text_source", "raw"),
+                "ts": corpus_label(run["manifest"]["spec"]),
                 "run_id": run["run_id"],
                 "hits": {qid: row["hits"] for qid, row in run["rows"].items()},
             }

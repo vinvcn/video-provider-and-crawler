@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -79,7 +80,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.strategy in ("dense", "rrf"):
         embed_client = EmbeddingClient(env.embed_config())
     spec = strategies.strategy_config(
-        args.strategy, embed_client, text_source=args.text_source, captions_version=args.captions
+        args.strategy,
+        embed_client,
+        text_source=args.text_source,
+        captions_version=args.captions,
+        captions_model=(captions.manifest.get("model") if captions else None),
     )
     strategy = strategies.build_strategy(
         args.strategy,
@@ -111,9 +116,19 @@ def cmd_run(args: argparse.Namespace) -> int:
 def cmd_captions_build(args: argparse.Namespace) -> int:
     root = _prepare()
     materials = _load_version(root, "materials", args.materials, Materials)
-    config = env.vlm_config()
-    client = captions_mod.GemmaCaptionClient(config.keys, config.model, config.rpm)
-    key_health = client.probe_keys()
+    rpm = args.rpm or None
+    if args.provider == "google":
+        config = env.vlm_config()
+        model = args.model or config.model
+        client = captions_mod.GemmaCaptionClient(config.keys, model, rpm or config.rpm)
+    else:
+        config = env.sf_vlm_config()
+        model = args.model or config.model
+        base_url = os.environ.get("VPC_SF_VLM_BASE_URL", captions_mod.SILICONFLOW_BASE_URL)
+        client = captions_mod.SiliconFlowCaptionClient(
+            config.keys[0], model, rpm or config.rpm, base_url=base_url
+        )
+    key_health = client.probe_keys() if hasattr(client, "probe_keys") else None
     manifest = captions_mod.build_captions(
         args.dsn,
         materials,
@@ -377,6 +392,17 @@ def register(sub: argparse._SubParsersAction) -> None:  # noqa: SLF001
     )
     cbuild.add_argument("--materials", default="v1")
     cbuild.add_argument("--version", default="v1")
+    cbuild.add_argument(
+        "--provider",
+        choices=["google", "siliconflow"],
+        default="google",
+        help="captioning endpoint family (model prompts differ per family)",
+    )
+    cbuild.add_argument(
+        "--model",
+        help="override the model (defaults: VPC_VLM_MODEL / VPC_SF_VLM_MODEL)",
+    )
+    cbuild.add_argument("--rpm", type=float, help="override the per-key requests/min cap")
     cbuild.add_argument("--concurrency", type=int, default=90, help="in-flight caption requests")
     cbuild.add_argument("--limit", type=int, help="only caption the first N docs (smoke)")
     cbuild.add_argument("--dsn")

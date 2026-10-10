@@ -76,8 +76,24 @@ def vlm_config() -> VlmConfig:
         raise SystemExit("missing environment variables: VPC_VLM_KEYS (comma-separated pool)")
     return VlmConfig(
         keys=keys,
-        model=os.environ.get("VPC_VLM_MODEL", "gemma-4-31b-it"),
+        model=os.environ.get("VPC_VLM_MODEL", "gemma-4-26b-a4b-it"),
         rpm=float(os.environ.get("VPC_VLM_RPM", "28") or 28),
+    )
+
+
+def sf_vlm_config() -> VlmConfig:
+    """SiliconFlow vision-language model (OpenAI-compatible chat completions).
+
+    Shares the SiliconFlow account key with the embedding endpoint unless
+    VPC_SF_VLM_API_KEY overrides it.
+    """
+    api_key = os.environ.get("VPC_SF_VLM_API_KEY") or os.environ.get("VPC_EMBED_API_KEY", "")
+    if not api_key:
+        raise SystemExit("missing environment variables: VPC_EMBED_API_KEY (SiliconFlow key)")
+    return VlmConfig(
+        keys=(api_key,),
+        model=os.environ.get("VPC_SF_VLM_MODEL", "deepseek-ai/DeepSeek-OCR"),
+        rpm=float(os.environ.get("VPC_SF_VLM_RPM", "110") or 110),
     )
 
 
