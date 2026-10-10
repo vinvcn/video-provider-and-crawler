@@ -132,6 +132,7 @@ function fmt(n, digits) { return Number(n).toFixed(digits === undefined ? 4 : di
 function renderBoard() {
   const rows = DATA.rows.slice();
   let html = '<table id="boardTable"><thead><tr><th>#</th><th data-k="strategy">策略</th>' +
+    '<th data-k="ts">语料</th>' +
     '<th data-k="run_id">run</th><th data-k="holdout">nDCG@10 holdout ▽</th>' +
     '<th data-k="full">nDCG@10 full</th><th data-k="recall10">R@10</th>' +
     '<th data-k="mrr10">MRR@10</th><th data-k="p50">p50 ms</th>' +
@@ -139,6 +140,7 @@ function renderBoard() {
   const best = Math.max(...rows.map(r => r.holdout));
   rows.forEach((r, i) => {
     html += '<tr><td>' + (i + 1) + '</td><td class="strat">' + r.strategy + '</td>' +
+      '<td style="color:var(--dim)">' + r.ts + '</td>' +
       '<td style="color:var(--dim)">' + r.run_id + '</td>' +
       '<td class="' + (r.holdout === best ? 'num-best' : '') + '">' + fmt(r.holdout) + '</td>' +
       '<td>' + fmt(r.full) + '</td><td>' + fmt(r.recall10) + '</td><td>' + fmt(r.mrr10) + '</td>' +
@@ -235,7 +237,7 @@ function renderDetail() {
   DATA.runs.forEach(run => {
     const hits = (run.hits[q.qid] || []).slice(0, 10);
     if (!hits.length) return;
-    html += '<div class="arm"><h4>' + run.strategy + ' — top 10</h4>';
+    html += '<div class="arm"><h4>' + run.strategy + ' · ' + run.ts + ' — top 10</h4>';
     hits.forEach(([docId, score], i) => {
       const j = (judged.find(x => x.d === docId) || {});
       const d = DATA.docs[docId] || {};
@@ -312,6 +314,7 @@ def build_report(
         rows.append(
             {
                 "strategy": scored["strategy"],
+                "ts": entry["run"]["manifest"]["spec"].get("text_source", "raw"),
                 "run_id": scored["run_id"],
                 "holdout": split_metrics["ndcg10"]["mean"],
                 "full": scored["splits"]["all"]["ndcg10"]["mean"],
@@ -324,7 +327,12 @@ def build_report(
         )
     rows.sort(key=lambda row: -row["holdout"])
 
-    cuts = {entry["scored"]["strategy"]: entry["cuts"].get(split, {}) for entry in report["runs"]}
+    cuts = {
+        f"{entry['scored']['strategy']}·{entry['run']['manifest']['spec'].get('text_source', 'raw')}": (
+            entry["cuts"].get(split, {})
+        )
+        for entry in report["runs"]
+    }
 
     docs = {
         row.doc_id: {
@@ -354,6 +362,7 @@ def build_report(
         runs.append(
             {
                 "strategy": run["manifest"]["spec"]["strategy"],
+                "ts": run["manifest"]["spec"].get("text_source", "raw"),
                 "run_id": run["run_id"],
                 "hits": {qid: row["hits"] for qid, row in run["rows"].items()},
             }
@@ -383,8 +392,8 @@ def build_report(
         "rows": rows,
         "pairwise": [
             {
-                "a": next(r["strategy"] for r in rows if r["run_id"] == pair["a"]),
-                "b": next(r["strategy"] for r in rows if r["run_id"] == pair["b"]),
+                "a": next(f"{r['strategy']}·{r['ts']}" for r in rows if r["run_id"] == pair["a"]),
+                "b": next(f"{r['strategy']}·{r['ts']}" for r in rows if r["run_id"] == pair["b"]),
                 "diff": pair["diff"],
                 "lo": pair["ci"][0],
                 "hi": pair["ci"][1],

@@ -15,7 +15,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import numpy as np
 
@@ -25,11 +25,28 @@ from bench.materials import Materials
 from store.bm25 import Bm25Model
 from store.embedding import HashEmbeddingProvider
 
+if TYPE_CHECKING:  # runtime import would create a cycle: captions -> judge -> run -> strategies
+    from bench.captions import Captions
+
 RRF_K = 60
 RRF_ARM_DEPTH = 100
 BM25_DEFAULTS = {"k1": 1.2, "b": 0.75}
 
 STRATEGY_IDS = ("bm25-both", "bm25-query", "hash-dense", "dense", "rrf")
+TEXT_SOURCES = ("raw", "caption")
+
+
+def resolve_texts(
+    materials: Materials, captions: Captions | None, text_source: str
+) -> dict[int, str]:
+    """Per-doc retrieval text for one source (caption docs may be missing -> '')."""
+    if text_source not in TEXT_SOURCES:
+        raise SystemExit(f"unknown text source {text_source!r}; expected one of {TEXT_SOURCES}")
+    if text_source == "raw":
+        return {doc_id: materials.rows[doc_id].embed_text for doc_id in materials.ids}
+    if captions is None:
+        raise SystemExit("text source 'caption' needs a built captions version")
+    return {doc_id: captions.texts.get(doc_id, "") for doc_id in materials.ids}
 
 
 @dataclass(frozen=True)
@@ -65,18 +82,18 @@ def _allowed_ids(materials: Materials, hard: dict) -> set[int] | None:
 class Bm25Strategy:
     """Local BM25 arm; `idf_side` selects legacy ('both') or textbook ('query')."""
 
-    def __init__(self, spec_id: str, materials: Materials, idf_side: str) -> None:
+    def __init__(
+        self, spec_id: str, materials: Materials, idf_side: str, texts: dict[int, str]
+    ) -> None:
         self.spec_id = spec_id
         self.materials = materials
         self.doc_ids = list(materials.ids)
         self.model = Bm25Model(idf_side=idf_side, **BM25_DEFAULTS).fit(
-            materials.rows[doc_id].embed_text for doc_id in self.doc_ids
+            texts[doc_id] for doc_id in self.doc_ids
         )
         self._postings: dict[int, list[tuple[int, float]]] = defaultdict(list)
         for doc_id in self.doc_ids:
-            for term_id, weight in self.model.doc_weights(
-                materials.rows[doc_id].embed_text
-            ).items():
+            for term_id, weight in self.model.doc_weights(texts[doc_id]).items():
                 self._postings[term_id].append((doc_id, weight))
 
     def search(self, query_text: str, k: int, hard: dict) -> SearchResult:
@@ -198,33 +215,48 @@ class RrfStrategy:
         return SearchResult(hits=hits, search_ms=search_ms, embed_ms=embed_ms)
 
 
-def build_hash_dense(materials: Materials) -> DenseStrategy:
-    """Offline smoke arm: hashing bag-of-words vectors, exact cosine."""
+def build_hash_dense(materials: Materials, texts: dict[int, str]) -> DenseStrategy:
+    """Offline smoke arm: hashing bag-of-words vectors over the chosen text source."""
     provider = HashEmbeddingProvider()
     doc_ids = list(materials.ids)
-    texts = [materials.rows[doc_id].embed_text for doc_id in doc_ids]
     vectors: list[list[float]] = []
-    for start in range(0, len(texts), provider.spec.max_batch):
-        vectors.extend(provider.dense_text(texts[start : start + provider.spec.max_batch]))
+    for start in range(0, len(doc_ids), provider.spec.max_batch):
+        chunk = doc_ids[start : start + provider.spec.max_batch]
+        vectors.extend(provider.dense_text([texts[doc_id] for doc_id in chunk]))
     matrix = _normalize_rows(np.asarray(vectors, dtype=np.float32))
     return DenseStrategy("hash-dense", materials, matrix, HashQueryEmbedder())
 
 
-def _embeddings_cache_dir(root: Path, model: str, dim: int | None, materials: Materials) -> Path:
-    key = f"{model.replace('/', '_')}-{dim or 'na'}-{materials.content_hash[:16]}"
+def _embeddings_cache_dir(
+    root: Path, model: str, dim: int | None, materials: Materials, text_key: str
+) -> Path:
+    key = f"{model.replace('/', '_')}-{dim or 'na'}-{text_key}-{materials.content_hash[:16]}"
     return root / "embeddings" / key
 
 
-def build_api_dense(materials: Materials, client: EmbeddingClient, root: Path) -> DenseStrategy:
+def build_api_dense(
+    materials: Materials,
+    client: EmbeddingClient,
+    root: Path,
+    texts: dict[int, str],
+    text_key: str = "raw",
+) -> DenseStrategy:
     """Dense arm over the user endpoint; materials vectors cached on disk."""
     doc_ids = list(materials.ids)
-    cache_dir = _embeddings_cache_dir(root, client.config.model, client.config.dim, materials)
+    cache_dir = _embeddings_cache_dir(
+        root, client.config.model, client.config.dim, materials, text_key=text_key
+    )
     vectors_path = cache_dir / "vectors.npy"
     tokens_before = client.total_tokens
     if not vectors_path.is_file():
-        texts = [materials.rows[doc_id].embed_text for doc_id in doc_ids]
+        ordered_texts = [texts[doc_id] for doc_id in doc_ids]
         client.total_tokens = 0
-        vectors = client.embed(texts)
+        vectors = client.embed(ordered_texts)
+        # docs with no text (missing caption) get a zero vector: findable by
+        # filters, never by similarity — the fail-open rule for missing values.
+        for position, text in enumerate(ordered_texts):
+            if not text:
+                vectors[position] = [0.0] * len(vectors[position])
         cache_dir.mkdir(parents=True, exist_ok=True)
         np.save(vectors_path, np.asarray(vectors, dtype=np.float32))
         util.write_json(
@@ -233,6 +265,7 @@ def build_api_dense(materials: Materials, client: EmbeddingClient, root: Path) -
                 "model": client.config.model,
                 "dim": client.config.dim,
                 "dim_effective": int(len(vectors[0])),
+                "text_key": text_key,
                 "materials_version": materials.version,
                 "materials_hash": materials.content_hash,
                 "tokens": client.total_tokens,
@@ -250,34 +283,48 @@ def build_api_dense(materials: Materials, client: EmbeddingClient, root: Path) -
 
 
 def build_strategy(
-    spec_id: str, materials: Materials, root: Path, embed_client: EmbeddingClient | None
+    spec_id: str,
+    materials: Materials,
+    root: Path,
+    embed_client: EmbeddingClient | None,
+    text_source: str = "raw",
+    captions: Captions | None = None,
 ) -> Strategy:
     """Registry: spec_id -> wired arm (validated against STRATEGY_IDS)."""
     if spec_id not in STRATEGY_IDS:
         raise SystemExit(f"unknown strategy {spec_id!r}; expected one of {STRATEGY_IDS}")
+    texts = resolve_texts(materials, captions, text_source)
+    text_key = "raw" if text_source == "raw" else f"caption-{captions.content_hash[:16]}"
     if spec_id == "bm25-both":
-        return Bm25Strategy(spec_id, materials, idf_side="both")
+        return Bm25Strategy(spec_id, materials, idf_side="both", texts=texts)
     if spec_id == "bm25-query":
-        return Bm25Strategy(spec_id, materials, idf_side="query")
+        return Bm25Strategy(spec_id, materials, idf_side="query", texts=texts)
     if spec_id == "hash-dense":
-        return build_hash_dense(materials)
+        return build_hash_dense(materials, texts)
     if spec_id == "dense":
         if embed_client is None:
             raise SystemExit("strategy 'dense' needs an embeddings endpoint (.env VPC_EMBED_*)")
-        return build_api_dense(materials, embed_client, root)
+        return build_api_dense(materials, embed_client, root, texts, text_key=text_key)
     if embed_client is None:
         raise SystemExit("strategy 'rrf' needs an embeddings endpoint (.env VPC_EMBED_*)")
-    bm25 = Bm25Strategy("bm25-query", materials, idf_side="query")
-    dense = build_api_dense(materials, embed_client, root)
+    bm25 = Bm25Strategy("bm25-query", materials, idf_side="query", texts=texts)
+    dense = build_api_dense(materials, embed_client, root, texts, text_key=text_key)
     rrf = RrfStrategy("rrf", [bm25, dense])
     rrf.materials_tokens_spent = getattr(dense, "materials_tokens_spent", 0)  # type: ignore[attr-defined]
     rrf.dim_effective = getattr(dense, "dim_effective", None)  # type: ignore[attr-defined]
     return rrf
 
 
-def strategy_config(spec_id: str, embed_client: EmbeddingClient | None) -> dict:
+def strategy_config(
+    spec_id: str,
+    embed_client: EmbeddingClient | None,
+    text_source: str = "raw",
+    captions_version: str | None = None,
+) -> dict:
     """Serializable spec (recorded in run manifests; hashed into run ids)."""
-    spec: dict[str, object] = {"strategy": spec_id}
+    spec: dict[str, object] = {"strategy": spec_id, "text_source": text_source}
+    if text_source == "caption":
+        spec["captions_version"] = captions_version
     if spec_id in ("bm25-both", "bm25-query"):
         spec["idf_side"] = "both" if spec_id == "bm25-both" else "query"
         spec.update(BM25_DEFAULTS)

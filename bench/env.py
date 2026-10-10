@@ -58,6 +58,29 @@ class EmbedConfig:
     query_prefix: str
 
 
+@dataclass(frozen=True)
+class VlmConfig:
+    """Google Generative Language endpoint used for thumbnail captioning."""
+
+    keys: tuple[str, ...]
+    model: str
+    rpm: float
+
+
+def vlm_config() -> VlmConfig:
+    """Captioning VLM from VPC_VLM_* (comma-separated key pool, per-key RPM)."""
+    keys = tuple(
+        key.strip() for key in os.environ.get("VPC_VLM_KEYS", "").split(",") if key.strip()
+    )
+    if not keys:
+        raise SystemExit("missing environment variables: VPC_VLM_KEYS (comma-separated pool)")
+    return VlmConfig(
+        keys=keys,
+        model=os.environ.get("VPC_VLM_MODEL", "gemma-4-31b-it"),
+        rpm=float(os.environ.get("VPC_VLM_RPM", "28") or 28),
+    )
+
+
 def judge_config() -> JudgeConfig:
     """Judge endpoint from VPC_JUDGE_* (errors list what is missing)."""
     missing = [

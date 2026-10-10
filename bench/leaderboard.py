@@ -126,19 +126,22 @@ def render_markdown(report: dict) -> str:
         f"- 判分:`{report['judge_version']}` · 主分:**{split} 平均 nDCG@10**"
         f"(full 分数并排展示,防小样本过读)",
         "",
-        "| # | 策略 | run | nDCG@10 ("
+        "| # | 策略 | 语料 | run | nDCG@10 ("
         + split
         + ") | nDCG@10 (full) | R@10 | MRR@10 | p50 ms | p95 ms | null@10 |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for rank, entry in enumerate(report["runs"], start=1):
         scored = entry["scored"]
         holdout = scored["splits"].get(split, scored["splits"]["all"])
         full = scored["splits"]["all"]
+        spec = entry["run"]["manifest"]["spec"]
         lines.append(
-            "| {} | {} | `{}` | {:.4f} | {:.4f} | {:.4f} | {:.4f} | {:.1f} | {:.1f} | {} |".format(
+            "| {} | {} | {} | `{}` | {:.4f} | {:.4f} | {:.4f} | {:.4f} |"
+            " {:.1f} | {:.1f} | {} |".format(
                 rank,
                 scored["strategy"],
+                spec.get("text_source", "raw"),
                 scored["run_id"],
                 holdout[report["primary_metric"]]["mean"],
                 full[report["primary_metric"]]["mean"],
@@ -181,7 +184,12 @@ def render_markdown(report: dict) -> str:
         for key in ("lang=zh", "lang=en", "hard=yes", "source=catalog", "source=designed"):
             cell = cuts.get(key)
             cells.append(f"{cell['mean_ndcg10']:.4f} (n={cell['n']})" if cell else "—")
-        lines.append(f"| {entry['scored']['strategy']} | " + " | ".join(cells) + " |")
+        spec = entry["run"]["manifest"]["spec"]
+        lines.append(
+            f"| {entry['scored']['strategy']} ({spec.get('text_source', 'raw')}) | "
+            + " | ".join(cells)
+            + " |"
+        )
     lines.append("")
     return "\n".join(lines)
 
@@ -193,6 +201,7 @@ def render_csv(report: dict) -> str:
         "rank",
         "run_id",
         "strategy",
+        "text_source",
         "config_hash",
         f"ndcg10_mean_{split}",
         "ndcg10_mean_full",
@@ -215,6 +224,7 @@ def render_csv(report: dict) -> str:
                     rank,
                     scored["run_id"],
                     scored["strategy"],
+                    entry["run"]["manifest"]["spec"].get("text_source", "raw"),
                     scored["config_hash"][:12],
                     f"{holdout[report['primary_metric']]['mean']:.6f}",
                     f"{full[report['primary_metric']]['mean']:.6f}",

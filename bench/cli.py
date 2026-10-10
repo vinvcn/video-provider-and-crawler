@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 from bench import calibrate, env, report_page, scoring, strategies
+from bench import captions as captions_mod
 from bench import export as export_mod
 from bench import judge as judge_mod
 from bench import leaderboard as leaderboard_mod
@@ -69,11 +70,26 @@ def cmd_run(args: argparse.Namespace) -> int:
     root = _prepare()
     materials = _load_version(root, "materials", args.materials, Materials)
     queries = _load_version(root, "queries", args.queries, QuerySet)
+    captions = None
+    if args.text_source == "caption":
+        captions = captions_mod.Captions.load(args.captions, root)
+        if captions.manifest.get("materials_version") != materials.version:
+            raise SystemExit("captions were built for a different materials version")
     embed_client = None
     if args.strategy in ("dense", "rrf"):
         embed_client = EmbeddingClient(env.embed_config())
-    spec = strategies.strategy_config(args.strategy, embed_client)
-    strategy = strategies.build_strategy(args.strategy, materials, root, embed_client)
+    spec = strategies.strategy_config(
+        args.strategy, embed_client, text_source=args.text_source, captions_version=args.captions
+    )
+    strategy = strategies.build_strategy(
+        args.strategy,
+        materials,
+        root,
+        embed_client,
+        text_source=args.text_source,
+        captions=captions,
+    )
+    text_key = "raw" if args.text_source == "raw" else f"caption-{captions.content_hash[:16]}"
     manifest = run_mod.run_strategy(
         strategy,
         spec,
@@ -83,10 +99,31 @@ def cmd_run(args: argparse.Namespace) -> int:
         depth=args.depth,
         limit=args.limit,
         embed_client=embed_client,
+        text_key=text_key,
     )
     if embed_client is not None:
         embed_client.close()
     manifest["out_dir"] = str(root / "runs" / manifest["run_id"])
+    print(json.dumps(manifest, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_captions_build(args: argparse.Namespace) -> int:
+    root = _prepare()
+    materials = _load_version(root, "materials", args.materials, Materials)
+    config = env.vlm_config()
+    client = captions_mod.GemmaCaptionClient(config.keys, config.model, config.rpm)
+    manifest = captions_mod.build_captions(
+        args.dsn,
+        materials,
+        args.version,
+        root,
+        client,
+        concurrency=args.concurrency,
+        limit=args.limit,
+    )
+    client.close()
+    manifest["out_dir"] = str(root / "captions" / args.version)
     print(json.dumps(manifest, ensure_ascii=False, indent=2))
     return 0
 
@@ -318,9 +355,30 @@ def register(sub: argparse._SubParsersAction) -> None:  # noqa: SLF001
     run.add_argument("--strategy", required=True, choices=list(strategies.STRATEGY_IDS))
     run.add_argument("--materials", default="v1")
     run.add_argument("--queries", default="v1")
+    run.add_argument(
+        "--text-source",
+        choices=list(strategies.TEXT_SOURCES),
+        default="raw",
+        help="retrieval text: raw (title/description/tags) or caption (VLM captions)",
+    )
+    run.add_argument(
+        "--captions", default="v1", help="captions version (with --text-source caption)"
+    )
     run.add_argument("--depth", type=int, default=50, help="ranked hits stored per query")
     run.add_argument("--limit", type=int, help="only run the first N queries (smoke)")
     run.set_defaults(func=cmd_run)
+
+    captions_parser = bench_sub.add_parser("captions", help="thumbnail caption corpus operations")
+    captions_sub = captions_parser.add_subparsers(dest="captions_command", required=True)
+    cbuild = captions_sub.add_parser(
+        "build", help="fetch thumbnails + caption them with the VLM (resumable)"
+    )
+    cbuild.add_argument("--materials", default="v1")
+    cbuild.add_argument("--version", default="v1")
+    cbuild.add_argument("--concurrency", type=int, default=90, help="in-flight caption requests")
+    cbuild.add_argument("--limit", type=int, help="only caption the first N docs (smoke)")
+    cbuild.add_argument("--dsn")
+    cbuild.set_defaults(func=cmd_captions_build)
 
     judge = bench_sub.add_parser("judge", help="pool + grade (LLM) all runs' candidates")
     judge.add_argument("--runs", required=True, help="comma-separated run ids")

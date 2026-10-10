@@ -35,6 +35,11 @@ ROWS = [
 ]
 
 
+def raw_texts(materials):
+    """The raw-text corpus (title/description/tags) for these fixtures."""
+    return {doc_id: materials.rows[doc_id].embed_text for doc_id in materials.ids}
+
+
 @pytest.fixture()
 def materials(bench_root: Path):
     return write_materials(bench_root, "v1", ROWS)
@@ -54,21 +59,21 @@ def _brute_force_top(model, materials, query, k, hard=None):
 
 
 def test_bm25_search_matches_brute_force(materials):
-    strategy = Bm25Strategy("bm25-query", materials, idf_side="query")
+    strategy = Bm25Strategy("bm25-query", materials, idf_side="query", texts=raw_texts(materials))
     result = strategy.search("ocean waves", k=3, hard={})
     expected = _brute_force_top(strategy.model, materials, "ocean waves", 3)
     assert [doc_id for doc_id, _ in result.hits] == [doc_id for doc_id, _ in expected]
 
 
 def test_bm25_retrieves_the_matching_doc_first(materials):
-    strategy = Bm25Strategy("bm25-query", materials, idf_side="query")
+    strategy = Bm25Strategy("bm25-query", materials, idf_side="query", texts=raw_texts(materials))
     result = strategy.search("city night skyline", k=2, hard={})
     assert result.hits[0][0] == 103
 
 
 def test_bm25_both_vs_query_is_a_real_ab_arm(materials):
-    both = Bm25Strategy("bm25-both", materials, idf_side="both")
-    fixed = Bm25Strategy("bm25-query", materials, idf_side="query")
+    both = Bm25Strategy("bm25-both", materials, idf_side="both", texts=raw_texts(materials))
+    fixed = Bm25Strategy("bm25-query", materials, idf_side="query", texts=raw_texts(materials))
     query = "ocean slow motion waves"
     both_ranking = [doc_id for doc_id, _ in both.search(query, k=4, hard={}).hits]
     fixed_ranking = [doc_id for doc_id, _ in fixed.search(query, k=4, hard={}).hits]
@@ -77,7 +82,7 @@ def test_bm25_both_vs_query_is_a_real_ab_arm(materials):
 
 
 def test_bm25_respects_hard_filters(materials):
-    strategy = Bm25Strategy("bm25-query", materials, idf_side="query")
+    strategy = Bm25Strategy("bm25-query", materials, idf_side="query", texts=raw_texts(materials))
     portrait = strategy.search("ocean waves", k=6, hard={"orientation": "portrait"})
     assert [doc_id for doc_id, _ in portrait.hits] == []  # nothing portrait + ocean
 
@@ -92,7 +97,7 @@ def test_bm25_respects_hard_filters(materials):
 
 
 def test_bm25_cjk_query_hits_nothing(materials):
-    strategy = Bm25Strategy("bm25-query", materials, idf_side="query")
+    strategy = Bm25Strategy("bm25-query", materials, idf_side="query", texts=raw_texts(materials))
     result = strategy.search("慢动作海浪", k=5, hard={})
     assert result.hits == []
 
@@ -103,7 +108,9 @@ def test_bm25_tie_break_by_doc_id(tmp_path):
         material_row(200, "Identical Content", tags=("same", "words")),
     ]
     twin_materials = write_materials(tmp_path, "twins", twin_rows)
-    strategy = Bm25Strategy("bm25-query", twin_materials, idf_side="query")
+    strategy = Bm25Strategy(
+        "bm25-query", twin_materials, idf_side="query", texts=raw_texts(twin_materials)
+    )
     result = strategy.search("identical content same words", k=2, hard={})
     assert [doc_id for doc_id, _ in result.hits] == [200, 201]
 
@@ -111,8 +118,8 @@ def test_bm25_tie_break_by_doc_id(tmp_path):
 def test_hash_dense_deterministic_and_filtered(materials):
     from bench.strategies import build_hash_dense
 
-    first = build_hash_dense(materials)
-    second = build_hash_dense(materials)
+    first = build_hash_dense(materials, raw_texts(materials))
+    second = build_hash_dense(materials, raw_texts(materials))
     q1 = first.search("ocean waves", k=3, hard={})
     q2 = second.search("ocean waves", k=3, hard={})
     assert [doc_id for doc_id, _ in q1.hits] == [doc_id for doc_id, _ in q2.hits]

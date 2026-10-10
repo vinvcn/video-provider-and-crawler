@@ -28,6 +28,7 @@ def run_strategy(
     depth: int = 50,
     limit: int | None = None,
     embed_client: EmbeddingClient | None = None,
+    text_key: str = "raw",
 ) -> dict:
     """Run `strategy` over every query; returns the run manifest."""
     run_id = "{}-{}-{}".format(
@@ -70,7 +71,9 @@ def run_strategy(
             {
                 "model": embed_client.config.model,
                 "dim": getattr(strategy, "dim_effective", None) or embed_client.config.dim,
-                "materials_tokens": _materials_cache_tokens(root, materials, embed_client),
+                "materials_tokens": _materials_cache_tokens(
+                    root, materials, embed_client, text_key
+                ),
                 "materials_tokens_spent": int(getattr(strategy, "materials_tokens_spent", 0)),
                 "query_tokens": max(
                     0,
@@ -87,12 +90,15 @@ def run_strategy(
     return manifest
 
 
-def _materials_cache_tokens(root: Path, materials: Materials, client: EmbeddingClient) -> int:
+def _materials_cache_tokens(
+    root: Path, materials: Materials, client: EmbeddingClient, text_key: str = "raw"
+) -> int:
     """Tokens spent on the materials side (one-time, from the cache metadata)."""
     from bench.strategies import _embeddings_cache_dir
 
     meta_path = (
-        _embeddings_cache_dir(root, client.config.model, client.config.dim, materials) / "meta.json"
+        _embeddings_cache_dir(root, client.config.model, client.config.dim, materials, text_key)
+        / "meta.json"
     )
     if not meta_path.is_file():
         return 0
