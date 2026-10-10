@@ -32,17 +32,17 @@ from bench.judge import Pacer
 from bench.materials import Materials
 
 RULE_VERSION = "captions-v1"
-PROMPT_VERSION = "caption-v1"
+PROMPT_VERSION = "caption-v2"
 GEMMA_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
+# Phrasing matters: the prescriptive "You are cataloging... requirements" style made
+# gemma-4 echo the task instead of describing the image; this imperative form is the
+# one verified against the endpoint (2026-10-10 probe).
 CAPTION_PROMPT = (
-    "You are cataloging a stock video by its thumbnail image. Describe what is "
-    "visible in 2-4 sentences: the main subject, the setting, the lighting, the "
-    "mood, the dominant colors, and the camera framing. Describe only what you "
-    "can see; do not speculate about motion, sound, or story. Plain text only, "
-    "no markdown, no lists."
+    "Describe this stock video thumbnail for a search index in 2-4 sentences: "
+    "main subject, setting, lighting, mood, colors, camera framing. Text only."
 )
-MAX_OUTPUT_TOKENS = 200
+MAX_OUTPUT_TOKENS = 512
 CAPTION_TEMPERATURE = 0.2
 MAX_ATTEMPTS_FACTOR = 2  # attempts = factor * key pool size
 
@@ -162,8 +162,9 @@ def ensure_thumbnails(
     materials: Materials,
     root: Path,
     concurrency: int = 8,
+    doc_ids: Sequence[int] | None = None,
 ) -> dict[int, dict]:
-    """Return {doc_id: {"path": Path, "source": str}} for every material doc.
+    """Return {doc_id: {"path": Path, "source": str}} for the requested docs.
 
     Reuses thumbnails the crawler already downloaded (read-only), then fetches
     the rest into the bench's own directory. Docs with no thumbnail anywhere
@@ -173,6 +174,9 @@ def ensure_thumbnails(
 
     from store.db import DEFAULT_DSN
 
+    wanted = list(doc_ids) if doc_ids is not None else list(materials.ids)
+    if not wanted:
+        return {}
     crawler_dir = Path(
         os.environ.get("VPC_THUMBNAIL_DIR", util.REPO_ROOT / "storage" / "thumbnails")
     )
@@ -180,7 +184,7 @@ def ensure_thumbnails(
     bench_dir.mkdir(parents=True, exist_ok=True)
 
     with psycopg.connect(dsn or DEFAULT_DSN) as conn:
-        rows = conn.execute(_THUMB_SQL, (materials.ids,)).fetchall()
+        rows = conn.execute(_THUMB_SQL, (wanted,)).fetchall()
 
     resolved: dict[int, dict] = {}
     pending: list[tuple[int, str]] = []
@@ -247,13 +251,13 @@ def build_captions(
     from bench.judge import LabelStore
 
     store = LabelStore(captions_path)
-    thumbs = ensure_thumbnails(dsn, materials, root)
-    pending = [doc_id for doc_id in materials.ids if not store.has(f"cap-{doc_id}")]
+    todo = [doc_id for doc_id in materials.ids if not store.has(f"cap-{doc_id}")]
+    if limit is not None:
+        todo = todo[:limit]
+    thumbs = ensure_thumbnails(dsn, materials, root, doc_ids=todo)
     if not thumbs:
         raise SystemExit("no thumbnails resolved; check thumbnail_url in stock_videos")
-    pending = [doc_id for doc_id in pending if doc_id in thumbs]
-    if limit is not None:
-        pending = pending[:limit]
+    pending = [doc_id for doc_id in todo if doc_id in thumbs]
 
     failed: list[int] = []
 
@@ -302,7 +306,10 @@ def build_captions(
         "code": util.code_version(),
     }
     manifest["frozen"] = False
-    complete = manifest["n_captions"] + manifest["n_failed"] >= manifest["n_with_thumbnail"]
+    complete = (
+        manifest["n_captions"] + manifest["n_failed"] >= manifest["n_with_thumbnail"]
+        and manifest["n_failed"] <= max(1, int(0.05 * manifest["n_with_thumbnail"]))
+    )
     if limit is None and complete:
         manifest["frozen"] = True
         util.write_json(manifest_path, manifest)
