@@ -96,9 +96,21 @@ def build_leaderboard(
         "judge_version": judge_version,
         "split": split,
         "primary_metric": PRIMARY,
+        "calibration": _calibration_for(root, judge_version),
         "runs": entries,
         "pairwise": pairwise,
     }
+
+
+def _calibration_for(root: Path, judge_version: str) -> dict | None:
+    """Attach the human-calibration report when one exists for this judge."""
+    try:
+        calibration = util.load_json(root / "reports" / "calibration-report.json")
+    except FileNotFoundError:
+        return None
+    if calibration.get("judge_version") != judge_version:
+        return None
+    return calibration
 
 
 def render_markdown(report: dict) -> str:
@@ -150,6 +162,16 @@ def render_markdown(report: dict) -> str:
             )
     else:
         lines.append("_(只有一条 run,无对比)_")
+    if report.get("calibration"):
+        cal = report["calibration"]
+        verdict = "通过" if cal["gate_passed"] else "未通过(需修 rubric/判分器)"
+        lines += [
+            "",
+            "## 人工校准(判分器 vs 人工抽检)",
+            "",
+            f"- n={cal['n_graded']} 对 · 一致率 **{cal['exact_agreement']:.1%}** · "
+            f"Cohen's κ = **{cal['cohens_kappa']:.2f}**(闸门 ≥{cal['gate']}:{verdict})",
+        ]
     lines += ["", "## 切分摘要(holdout 平均 nDCG@10,关键切面)", ""]
     lines.append("| 策略 | lang=zh | lang=en | hard=yes | catalog | designed |")
     lines.append("|---|---|---|---|---|---|")

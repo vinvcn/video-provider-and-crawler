@@ -284,6 +284,17 @@ renderBoard(); renderPairs(); renderCuts(); renderQueryList(); renderDetail();
 """
 
 
+def _calibration_note(calibration: dict | None) -> str:
+    """Human-calibration line for the report header, when one exists."""
+    if not calibration:
+        return ""
+    return (
+        f"人工校准:{calibration['n_graded']} 对,一致率 {calibration['exact_agreement']:.0%},"
+        f"Cohen's κ {calibration['cohens_kappa']:.2f}"
+        f"({'通过' if calibration['gate_passed'] else '未达闸门'})。"
+    )
+
+
 def build_report(
     root: Path,
     materials: Materials,
@@ -360,13 +371,15 @@ def build_report(
             ),
             "board_note": (
                 "主分 = holdout 平均 nDCG@10(点击表头排序);full 列并排展示防小样本过读。"
-                "「数据浏览」页可逐条查询查看各臂 top-10 与判分理由。"
+                + _calibration_note(report.get("calibration"))
+                + "「数据浏览」页可逐条查询查看各臂 top-10 与判分理由。"
             ),
             "footer": (
                 "原始数据:storage/bench/reports/ 下的 export-queries / export-judgments / "
                 "export-hits CSV 与 leaderboard md/csv/summary。"
             ),
         },
+        "calibration": report.get("calibration"),
         "rows": rows,
         "pairwise": [
             {
