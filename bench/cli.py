@@ -113,6 +113,7 @@ def cmd_captions_build(args: argparse.Namespace) -> int:
     materials = _load_version(root, "materials", args.materials, Materials)
     config = env.vlm_config()
     client = captions_mod.GemmaCaptionClient(config.keys, config.model, config.rpm)
+    key_health = client.probe_keys()
     manifest = captions_mod.build_captions(
         args.dsn,
         materials,
@@ -121,6 +122,7 @@ def cmd_captions_build(args: argparse.Namespace) -> int:
         client,
         concurrency=args.concurrency,
         limit=args.limit,
+        key_health=key_health,
     )
     client.close()
     manifest["out_dir"] = str(root / "captions" / args.version)

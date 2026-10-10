@@ -69,8 +69,27 @@ def parse_caption(payload: Mapping[str, object]) -> str:
     return " ".join(cleaned)
 
 
+class _KeyState:
+    """Per-key health bookkeeping: consecutive failures + blocked-until stamp."""
+
+    def __init__(self) -> None:
+        self.fails = 0
+        self.blocked_until = 0.0
+
+
+COOLDOWN_SECONDS = 300.0  # after 3 consecutive failures a key rests for 5 minutes
+FAST_FAIL_BACKOFF = 0.5  # seconds per attempt when the failure was instant
+
+
 class GemmaCaptionClient:
-    """Google generateContent client with a rotating key pool (per-key pacing)."""
+    """Google generateContent client with a rotating, health-aware key pool.
+
+    Free-tier project keys fail individually (some return 500 for a model, some
+    are 403-blocked), so the pool tracks per-key health: 401/403 blocks a key
+    permanently, three consecutive 5xx/429 failures cool it down for five
+    minutes, and request starts stay paced per key (RPM). Fast failures back
+    off quickly instead of eating 30-second sleeps.
+    """
 
     def __init__(
         self,
@@ -83,9 +102,10 @@ class GemmaCaptionClient:
             raise CaptionError("caption client needs at least one API key")
         self.model = model
         self._keys = list(keys)
+        self._states = [_KeyState() for _ in self._keys]
         self._pacers = [Pacer(rpm) for _ in self._keys]
         self._lock = threading.Lock()
-        self._next_key = 0
+        self._rr = 0
         self.requests = 0
         self._client = httpx.Client(
             base_url=GEMMA_BASE_URL,
@@ -98,11 +118,64 @@ class GemmaCaptionClient:
         self._client.close()
 
     def _pick_key(self) -> int:
+        """Round-robin over the keys not in cooldown (eariest unblock if all cooling)."""
+        now = time.monotonic()
+        available = [i for i, s in enumerate(self._states) if s.blocked_until <= now]
+        if not available:
+            available = [min(range(len(self._keys)), key=lambda i: self._states[i].blocked_until)]
         with self._lock:
-            index = self._next_key
-            self._next_key = (self._next_key + 1) % len(self._keys)
+            index = available[self._rr % len(available)]
+            self._rr += 1
             self.requests += 1
             return index
+
+    def _mark_ok(self, index: int) -> None:
+        self._states[index].fails = 0
+
+    def _mark_fail(self, index: int, status_code: int) -> None:
+        state = self._states[index]
+        state.fails += 1
+        if status_code in (401, 403):
+            state.blocked_until = float("inf")
+        elif state.fails >= 3:
+            state.blocked_until = time.monotonic() + COOLDOWN_SECONDS
+
+    def probe_keys(self, timeout: float = 45.0) -> dict[str, int]:
+        """One tiny request per key (in parallel); unblock only healthy keys.
+
+        401/403 keys are blocked permanently; failing keys rest for an hour.
+        Returns counts: {"healthy": n, "cooldown": n, "blocked": n}.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        def probe(index: int) -> int:
+            try:
+                response = self._client.post(
+                    f"/models/{self.model}:generateContent",
+                    json={
+                        "contents": [{"parts": [{"text": "Say OK."}]}],
+                        "generationConfig": {"maxOutputTokens": 8},
+                    },
+                    headers={"X-goog-api-key": self._keys[index]},
+                )
+                return response.status_code
+            except httpx.HTTPError:
+                return 599
+
+        with ThreadPoolExecutor(max_workers=len(self._keys)) as pool:
+            codes = list(pool.map(probe, range(len(self._keys))))
+        summary = {"healthy": 0, "cooldown": 0, "blocked": 0}
+        for index, code in enumerate(codes):
+            if code == 200:
+                self._mark_ok(index)
+                summary["healthy"] += 1
+            elif code in (401, 403):
+                self._states[index].blocked_until = float("inf")
+                summary["blocked"] += 1
+            else:
+                self._states[index].blocked_until = time.monotonic() + 3600.0
+                summary["cooldown"] += 1
+        return summary
 
     def caption_image(self, image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
         """Caption one image; rotates keys and retries transient failures."""
@@ -124,6 +197,7 @@ class GemmaCaptionClient:
         for attempt in range(MAX_ATTEMPTS_FACTOR * len(self._keys)):
             index = self._pick_key()
             self._pacers[index].wait()
+            started = time.perf_counter()
             try:
                 response = self._client.post(
                     f"/models/{self.model}:generateContent",
@@ -132,13 +206,25 @@ class GemmaCaptionClient:
                 )
             except httpx.HTTPError as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
+                self._mark_fail(index, 599)
                 time.sleep(min(2**attempt, 30))
                 continue
+            elapsed = time.perf_counter() - started
             if response.status_code == 200:
+                self._mark_ok(index)
                 return parse_caption(response.json())
             last_error = f"HTTP {response.status_code}: {response.text[:120]}"
             if response.status_code in (429, 500, 502, 503, 504):
-                time.sleep(min(2**attempt, 30))
+                self._mark_fail(index, response.status_code)
+                backoff = (
+                    min(FAST_FAIL_BACKOFF * (attempt + 1), 5.0)
+                    if elapsed < 5.0
+                    else min(2**attempt, 30)
+                )
+                time.sleep(backoff)
+                continue
+            if response.status_code in (401, 403):
+                self._mark_fail(index, response.status_code)
                 continue
             raise CaptionError(f"caption endpoint rejected request: {last_error}")
         raise CaptionError(
@@ -240,6 +326,7 @@ def build_captions(
     client: GemmaCaptionClient,
     concurrency: int = 90,
     limit: int | None = None,
+    key_health: dict | None = None,
 ) -> dict:
     """Caption every materials doc that has a thumbnail; returns the manifest."""
     out_dir = root / "captions" / version
@@ -300,16 +387,16 @@ def build_captions(
         "model": client.model,
         "prompt_version": PROMPT_VERSION,
         "prompt": CAPTION_PROMPT,
+        "key_health": key_health,
         "materials_version": materials.version,
         "materials_hash": materials.content_hash,
         "content_hash": util.content_hash(records),
         "code": util.code_version(),
     }
     manifest["frozen"] = False
-    complete = (
-        manifest["n_captions"] + manifest["n_failed"] >= manifest["n_with_thumbnail"]
-        and manifest["n_failed"] <= max(1, int(0.05 * manifest["n_with_thumbnail"]))
-    )
+    complete = manifest["n_captions"] + manifest["n_failed"] >= manifest[
+        "n_with_thumbnail"
+    ] and manifest["n_failed"] <= max(1, int(0.05 * manifest["n_with_thumbnail"]))
     if limit is None and complete:
         manifest["frozen"] = True
         util.write_json(manifest_path, manifest)

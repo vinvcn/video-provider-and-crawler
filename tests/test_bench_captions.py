@@ -37,7 +37,8 @@ def test_parse_caption_joins_parts_and_strips_markdown():
     assert parse_caption({"candidates": []}) == ""
 
 
-def test_caption_client_rotates_keys_on_server_errors():
+def test_caption_client_rotates_keys_on_server_errors(monkeypatch):
+    monkeypatch.setattr("bench.captions.time.sleep", lambda seconds: None)
     seen_keys = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -56,7 +57,9 @@ def test_caption_client_rotates_keys_on_server_errors():
     assert seen_keys == ["key-a", "key-b"]
 
 
-def test_caption_client_raises_after_pool_exhausted():
+def test_caption_client_raises_after_pool_exhausted(monkeypatch):
+    monkeypatch.setattr("bench.captions.time.sleep", lambda seconds: None)
+
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, json={"error": {"code": 500}})
 
@@ -65,6 +68,61 @@ def test_caption_client_raises_after_pool_exhausted():
     )
     with pytest.raises(CaptionError, match="failed after 4 attempts"):
         client.caption_image(b"fake-jpeg-bytes")
+    client.close()
+
+
+def test_caption_client_blocks_dead_key_and_uses_healthy(monkeypatch):
+    monkeypatch.setattr("bench.captions.time.sleep", lambda seconds: None)
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        key = request.headers.get("X-goog-api-key", "")
+        calls.append(key)
+        if key == "dead":
+            return httpx.Response(403, json={"error": {"code": 403}})
+        return httpx.Response(200, json=GEMMA_RESPONSE)
+
+    client = GemmaCaptionClient(
+        keys=["dead", "live"], model="gemma-4-31b-it", rpm=0, transport=_transport(handler)
+    )
+    caption = client.caption_image(b"fake-jpeg-bytes")
+    assert caption.startswith("Main subject")
+    # the 403 key is now permanently blocked; the next image goes straight to live
+    calls.clear()
+    client.caption_image(b"fake-jpeg-bytes")
+    assert calls == ["live"]
+    client.close()
+
+
+def test_probe_keys_classifies_health(monkeypatch):
+    monkeypatch.setattr("bench.captions.time.sleep", lambda seconds: None)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        key = request.headers.get("X-goog-api-key", "")
+        if key == "ok":
+            return httpx.Response(200, json=GEMMA_RESPONSE)
+        if key == "banned":
+            return httpx.Response(403, json={"error": {"code": 403}})
+        return httpx.Response(500, json={"error": {"code": 500}})
+
+    client = GemmaCaptionClient(
+        keys=["ok", "banned", "broken"],
+        model="gemma-4-31b-it",
+        rpm=0,
+        transport=_transport(handler),
+    )
+    summary = client.probe_keys()
+    assert summary == {"healthy": 1, "cooldown": 1, "blocked": 1}
+    # after probing, only the healthy key serves requests
+    seen: list[str] = []
+
+    def record_handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("X-goog-api-key", ""))
+        return httpx.Response(200, json=GEMMA_RESPONSE)
+
+    client._client._transport = _transport(record_handler)  # noqa: SLF001 - test seam
+    client.caption_image(b"fake-jpeg-bytes")
+    assert seen == ["ok"]
     client.close()
 
 
