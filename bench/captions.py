@@ -42,9 +42,14 @@ CAPTION_PROMPT = (
     "Describe this stock video thumbnail for a search index in 2-4 sentences: "
     "main subject, setting, lighting, mood, colors, camera framing. Text only."
 )
-MAX_OUTPUT_TOKENS = 512
+MAX_OUTPUT_TOKENS = 1024
 CAPTION_TEMPERATURE = 0.2
 MAX_ATTEMPTS_FACTOR = 2  # attempts = factor * key pool size
+
+# Field markers the prompt asks for; used to cut task-echo preambles that gemma
+# sometimes prepends ("Task: Describe ... Constraints: ...") before the answer.
+_FIELD_MARKERS = ("main subject:", "subject:", "setting:")
+_TASK_ECHO_PREFIXES = ("task:", "constraints:", "requirements:", "required elements:", "format:")
 
 
 class CaptionError(RuntimeError):
@@ -52,7 +57,14 @@ class CaptionError(RuntimeError):
 
 
 def parse_caption(payload: Mapping[str, object]) -> str:
-    """Extract and normalise the text answer from a generateContent response."""
+    """Extract and normalise the text answer from a generateContent response.
+
+    Gemma occasionally echoes the task as a preamble ("Task: Describe …
+    Constraints: …") before the real answer. That boilerplate would be copy-
+    pasted into thousands of captions and pollute the corpus, so when an echo
+    is detected the text is cut at the first field marker; otherwise known
+    echo lines are dropped individually.
+    """
     candidates = payload.get("candidates") or []
     texts: list[str] = []
     for candidate in candidates:
@@ -61,12 +73,18 @@ def parse_caption(payload: Mapping[str, object]) -> str:
             if text:
                 texts.append(str(text))
     raw = " ".join(texts).strip()
-    cleaned: list[str] = []
+    lines: list[str] = []
     for line in raw.splitlines():
         line = line.strip().lstrip("*-# ").strip()
         if line:
-            cleaned.append(line)
-    return " ".join(cleaned)
+            lines.append(line)
+    lowered = [line.lower() for line in lines]
+    if any(line.startswith(_TASK_ECHO_PREFIXES) for line in lowered):
+        for index, line in enumerate(lowered):
+            if line.startswith(_FIELD_MARKERS):
+                return " ".join(lines[index:])
+        lines = [line for line in lines if not line.lower().startswith(_TASK_ECHO_PREFIXES)]
+    return " ".join(lines)
 
 
 class _KeyState:
@@ -207,7 +225,7 @@ class GemmaCaptionClient:
             except httpx.HTTPError as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
                 self._mark_fail(index, 599)
-                time.sleep(min(2**attempt, 30))
+                time.sleep(min(FAST_FAIL_BACKOFF * (attempt + 1), 5.0))
                 continue
             elapsed = time.perf_counter() - started
             if response.status_code == 200:

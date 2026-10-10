@@ -37,6 +37,55 @@ def test_parse_caption_joins_parts_and_strips_markdown():
     assert parse_caption({"candidates": []}) == ""
 
 
+def test_parse_caption_cuts_task_echo_preamble():
+    """gemma sometimes restates the task before answering; the echo must not
+    leak boilerplate into the corpus."""
+    payload = {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [
+                        {
+                            "text": (
+                                "* Task: Describe the stock video thumbnail.\n"
+                                "* Constraints: 2-4 sentences.\n"
+                                "* Required elements: subject, setting, colors.\n"
+                                "* Format: Text only.\n"
+                                "* Main subject: Silhouetted evergreen trees.\n"
+                                "* Setting: forest edge at sunset.\n"
+                            )
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+    caption = parse_caption(payload)
+    assert caption == ("Main subject: Silhouetted evergreen trees. Setting: forest edge at sunset.")
+
+
+def test_parse_caption_drops_orphan_echo_lines_without_marker():
+    payload = {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [
+                        {
+                            "text": (
+                                "Task: Describe a thumbnail.\n"
+                                "Constraints: none.\n"
+                                "A close-up of a vintage camera on a desk.\n"
+                            )
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+    caption = parse_caption(payload)
+    assert caption == "A close-up of a vintage camera on a desk."
+
+
 def test_caption_client_rotates_keys_on_server_errors(monkeypatch):
     monkeypatch.setattr("bench.captions.time.sleep", lambda seconds: None)
     seen_keys = []
