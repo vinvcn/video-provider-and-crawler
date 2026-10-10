@@ -13,7 +13,7 @@
 | `vpc fetch-search --terms "a,b" --pages-per-term N` | 关键词搜索(每词 ≤20 页 / 480 条) | `state/search.json` | `spool/search/` |
 | `vpc fetch-ids --limit N [--order lastmod\|id\|random]` | 按 ID 取元数据(Next 数据路由,补目录缺口) | `state/ids.json` | `spool/ids/` |
 | `vpc fetch-sitemaps --kind all` | 落 video/query sitemap(目录 oracle + 查询宇宙) | (DB 表) | `spool/sitemap/` |
-| `vpc ingest [--kind K] [--skip-thumbnails]` | spool → 规范化 → upsert →(可选)缩略图 | — | — |
+| `vpc ingest [--kind K] [--skip-thumbnails] [--full]` | spool → 规范化 → upsert →(可选)缩略图;**默认增量**(只吃未消费的 spool) | `state/ingest.json`(消费水位) | — |
 | `vpc status` | 库存计数 | — | — |
 | `vpc migrate` | 前向迁移 | — | — |
 
@@ -46,6 +46,11 @@ spec 通过临时文件传递;不下载视频、不使用官方 API key。
 - `buildId`:优先读当前页面的 `window.__NEXT_DATA__.buildId`(读不到就导航一次并轮询),
   成功后持久化到 `state/ids.json`;站点发版后若整批 404 会自动重读(`BUILD-REFRESH`)。
 - 404 视为已删除/未收录:写 spool 记录并标记完成,不再重试(计入 `missing`)。
+- 已删除/下架视频另有精确信号:数据路由返回 **HTTP 200 + `pageProps.__N_REDIRECT`
+  指向 `/search/...?missing_medium`**(没有 `pageProps.medium`)。抓取器把它记为
+  `{"status":200,"not_found":true,...}`,且**不**计入 fail-streak;`vpc ingest --kind ids`
+  会把对应 `catalog_videos.missing_since` 标上,gap 查询从此跳过,批次不会被死 ID 堵住
+  (2026-10-09 队列头卡死事故的修复)。
 - spool 记录形如 `{"status":200,"attributes":{…}}`(与列表项同构);`vpc ingest --kind ids` 兼容。
 - 速率:约 1 请求/视频、~85KB;pool 4 起步。
 - 已知差异:数据路由返回的 `tags` 比列表/搜索少(3–10 vs 40–50,后者用了 `seo_tags=true`)——
@@ -101,7 +106,13 @@ storage/
   state/seed.json          深层游标 + seed_pages
   state/seed-head.json     head_cursor 标记 + run_date
   state/search.json        done_keys
+  state/ids.json           按 ID 抓取进度
+  state/ingest.json        每个 kind 的 spool 消费水位(mtime_ns 下限)
   thumbnails/<pexels_id>.jpg
 ```
 
 原始响应先落 spool 再入库,全部可重放(`vpc ingest` 幂等,`pexels_id` 为键)。
+`vpc ingest` 默认增量:按 `state/ingest.json` 的水位只处理新增或被重写的 spool 文件
+(失败/中断不推进水位,下次自动重放)。删除 `state/ingest.json` 或加 `--full` 即整库重放。
+写库侧还有第二个闸门:`ON CONFLICT ... WHERE raw IS DISTINCT FROM EXCLUDED.raw`,
+内容未变的记录不会重写行、不刷 `updated_at`。
