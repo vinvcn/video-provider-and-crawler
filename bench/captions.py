@@ -131,7 +131,8 @@ class _Breaker:
             self._consecutive += 1
             if self._consecutive >= self.threshold:
                 raise SystemExit(
-                    f"caption endpoint unreachable: {self._consecutive} consecutive failures — aborting pass"
+                    f"caption endpoint unreachable: "
+                    f"{self._consecutive} consecutive failures — aborting pass"
                 )
 
 
