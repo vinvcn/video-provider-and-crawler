@@ -14,7 +14,9 @@ BATCH_IDS="${BATCH_IDS:-2000}"
 MAX_BATCHES="${MAX_BATCHES:-500}"
 ORDER="${ORDER:-lastmod}"
 MAX_IDS="${MAX_IDS:-0}"
-PROGRESS="${PROGRESS:-/tmp/opencode/gapfill-progress.log}"
+LOG_DIR="${LOG_DIR:-$REPO/storage/logs}"
+mkdir -p "$LOG_DIR"
+PROGRESS="${PROGRESS:-$LOG_DIR/gapfill-progress.log}"
 mkdir -p "$(dirname "$PROGRESS")"
 
 db() { docker exec dev-middleware-stock-db psql -U postgres -d stock -tAc "$1"; }
@@ -42,7 +44,7 @@ for i in $(seq 1 "$MAX_BATCHES"); do
     [ "$remaining" -lt "$BATCH_IDS" ] && limit="$remaining"
   fi
 
-  batch_log="/tmp/opencode/gapfill-batch-$i.log"
+  batch_log="$LOG_DIR/gapfill-batch-$i.log"
   uv run vpc fetch-ids --limit "$limit" --order "$ORDER" --pool 4 --retries 60 \
     >>"$batch_log" 2>&1
   attempted=$((attempted + limit))
