@@ -108,6 +108,31 @@ class _KeyState:
 
 COOLDOWN_SECONDS = 300.0  # after 3 consecutive failures a key rests for 5 minutes
 FAST_FAIL_BACKOFF = 0.5  # seconds per attempt when the failure was instant
+BREAKER_THRESHOLD = 40  # consecutive failed requests with zero successes
+
+
+class _Breaker:
+    """Circuit breaker: a wedged endpoint aborts the pass instead of grinding.
+
+    Without it, an outage turns every pending doc into 12 attempts x 300s
+    timeouts — hours of dead time before the loop can back off.
+    """
+
+    def __init__(self, threshold: int = BREAKER_THRESHOLD) -> None:
+        self.threshold = threshold
+        self._lock = threading.Lock()
+        self._consecutive = 0
+
+    def record(self, ok: bool) -> None:
+        with self._lock:
+            if ok:
+                self._consecutive = 0
+                return
+            self._consecutive += 1
+            if self._consecutive >= self.threshold:
+                raise SystemExit(
+                    f"caption endpoint unreachable: {self._consecutive} consecutive failures — aborting pass"
+                )
 
 
 class GemmaCaptionClient:
@@ -136,6 +161,7 @@ class GemmaCaptionClient:
         self._lock = threading.Lock()
         self._rr = 0
         self.requests = 0
+        self._breaker = _Breaker()
         self.prompt = CAPTION_PROMPT
         self.prompt_version = PROMPT_VERSION
         self._client = httpx.Client(
@@ -241,15 +267,18 @@ class GemmaCaptionClient:
             except httpx.HTTPError as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
                 self._mark_fail(index, 599)
+                self._breaker.record(False)
                 time.sleep(min(FAST_FAIL_BACKOFF * (attempt + 1), 5.0))
                 continue
             elapsed = time.perf_counter() - started
             if response.status_code == 200:
                 self._mark_ok(index)
+                self._breaker.record(True)
                 return parse_caption(response.json())
             last_error = f"HTTP {response.status_code}: {response.text[:120]}"
             if response.status_code in (429, 500, 502, 503, 504):
                 self._mark_fail(index, response.status_code)
+                self._breaker.record(False)
                 backoff = (
                     min(FAST_FAIL_BACKOFF * (attempt + 1), 5.0)
                     if elapsed < 5.0
@@ -285,6 +314,7 @@ class SiliconFlowCaptionClient:
         self.model = model
         self.prompt, self.prompt_version = MODEL_PROMPTS.get(model.lower(), DEFAULT_SF_PROMPT)
         self._pacer = Pacer(rpm)
+        self._breaker = _Breaker()
         self._client = httpx.Client(
             base_url=base_url,
             headers={"Authorization": f"Bearer {api_key}"},
@@ -322,14 +352,17 @@ class SiliconFlowCaptionClient:
                 response = self._client.post("/chat/completions", json=body)
             except httpx.HTTPError as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
+                self._breaker.record(False)
                 time.sleep(min(2**attempt, 15))
                 continue
             if response.status_code == 200:
                 message = response.json()["choices"][0]["message"]
                 content = str(message.get("content") or "").strip()
+                self._breaker.record(True)
                 return " ".join(content.split())
             last_error = f"HTTP {response.status_code}: {response.text[:120]}"
             if response.status_code in (429, 500, 502, 503, 504):
+                self._breaker.record(False)
                 time.sleep(min(2**attempt, 15))
                 continue
             raise CaptionError(f"caption endpoint rejected request: {last_error}")

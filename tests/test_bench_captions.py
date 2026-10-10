@@ -320,6 +320,25 @@ def test_caption_prompt_registry_keys_are_lowercase():
     assert prompt == DEEPSEEK_OCR_PROMPT and version == DEEPSEEK_OCR_PROMPT_VERSION
 
 
+def test_breaker_trips_only_on_consecutive_failures():
+    """A wedged endpoint must abort the pass instead of grinding timeouts."""
+    from bench.captions import _Breaker
+
+    breaker = _Breaker(threshold=3)
+    breaker.record(False)
+    breaker.record(False)
+    breaker.record(True)  # any success resets the counter
+    breaker.record(False)
+    breaker.record(False)
+    with pytest.raises(SystemExit, match="unreachable"):
+        breaker.record(False)
+    # after a trip, the very next failure still trips (sticky until a success)
+    with pytest.raises(SystemExit):
+        breaker.record(False)
+    breaker.record(True)
+    breaker.record(False)  # healthy again: single failures are tolerated
+
+
 def test_pacer_import_unchanged():
     # Pacer is shared between judge and caption clients; make sure it still exists
     assert Pacer(per_minute=0).wait() is None
