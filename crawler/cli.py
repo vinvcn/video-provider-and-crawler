@@ -204,6 +204,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
                 conn,
                 settings.thumbnail_dir,
                 limit=args.thumb_limit,
+                concurrency=args.thumb_concurrency,
                 use_proxy=settings.use_proxy,
             )
         print(json.dumps(result, ensure_ascii=False))
@@ -293,6 +294,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--batch", type=int, default=500)
     p.add_argument("--skip-thumbnails", action="store_true")
     p.add_argument("--thumb-limit", type=int, default=2000)
+    p.add_argument(
+        "--thumb-concurrency",
+        type=int,
+        default=8,
+        help="parallel thumbnail downloads (latency-bound: 8 is ~2.6/s, 96 ~30/s)",
+    )
     p.set_defaults(func=cmd_ingest)
 
     p = sub.add_parser("embed", help="backfill embedding columns (Phase 2 seam)")
