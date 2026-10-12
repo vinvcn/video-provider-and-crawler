@@ -94,7 +94,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         text_source=args.text_source,
         captions=captions,
     )
-    text_key = "raw" if args.text_source == "raw" else f"caption-{captions.content_hash[:16]}"
+    if args.text_source == "caption":
+        text_key = f"caption-{captions.content_hash[:16]}"
+    else:
+        text_key = args.text_source  # raw + ablation variants get their own cache
     manifest = run_mod.run_strategy(
         strategy,
         spec,

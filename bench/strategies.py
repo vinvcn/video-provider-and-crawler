@@ -33,7 +33,40 @@ RRF_ARM_DEPTH = 100
 BM25_DEFAULTS = {"k1": 1.2, "b": 0.75}
 
 STRATEGY_IDS = ("bm25-both", "bm25-query", "hash-dense", "dense", "rrf")
-TEXT_SOURCES = ("raw", "caption")
+TEXT_SOURCES = (
+    "raw",
+    "caption",
+    "raw-title",
+    "raw-title-desc",
+    "raw-tags-df5",
+    "raw-tags-df10",
+)
+# Tag-corpus ablation: drop tags whose document frequency crosses the share.
+_TAG_DF_VARIANTS = {"raw-tags-df5": 0.05, "raw-tags-df10": 0.10}
+
+
+def _tag_document_frequency(materials: Materials) -> dict[str, int]:
+    """Lowercased tag -> number of materials docs containing it."""
+    counts: dict[str, int] = {}
+    for doc_id in materials.ids:
+        for tag in {tag.lower() for tag in materials.rows[doc_id].tags}:
+            counts[tag] = counts.get(tag, 0) + 1
+    return counts
+
+
+def _generic_tags(materials: Materials, share: float) -> frozenset[str]:
+    """Tags appearing in >= `share` of the corpus (the generic-tag drop list)."""
+    n = len(materials.ids)
+    return frozenset(
+        tag for tag, count in _tag_document_frequency(materials).items() if count >= n * share
+    )
+
+
+def _composed(title: str, description: str, tags: tuple[str, ...]) -> str:
+    """Same serialisation as the raw corpus (title — description — tags)."""
+    from store.embedding import build_embed_text
+
+    return build_embed_text({"title": title, "description": description, "tags": list(tags)})
 
 
 def resolve_texts(
@@ -44,9 +77,29 @@ def resolve_texts(
         raise SystemExit(f"unknown text source {text_source!r}; expected one of {TEXT_SOURCES}")
     if text_source == "raw":
         return {doc_id: materials.rows[doc_id].embed_text for doc_id in materials.ids}
-    if captions is None:
-        raise SystemExit("text source 'caption' needs a built captions version")
-    return {doc_id: captions.texts.get(doc_id, "") for doc_id in materials.ids}
+    if text_source == "caption":
+        if captions is None:
+            raise SystemExit("text source 'caption' needs a built captions version")
+        return {doc_id: captions.texts.get(doc_id, "") for doc_id in materials.ids}
+    if text_source in ("raw-title", "raw-title-desc"):
+        include_desc = text_source == "raw-title-desc"
+        return {
+            doc_id: _composed(
+                materials.rows[doc_id].title,
+                materials.rows[doc_id].description if include_desc else "",
+                (),
+            )
+            for doc_id in materials.ids
+        }
+    drop = _generic_tags(materials, _TAG_DF_VARIANTS[text_source])
+    return {
+        doc_id: _composed(
+            materials.rows[doc_id].title,
+            materials.rows[doc_id].description,
+            tuple(tag for tag in materials.rows[doc_id].tags if tag.lower() not in drop),
+        )
+        for doc_id in materials.ids
+    }
 
 
 @dataclass(frozen=True)
@@ -294,7 +347,10 @@ def build_strategy(
     if spec_id not in STRATEGY_IDS:
         raise SystemExit(f"unknown strategy {spec_id!r}; expected one of {STRATEGY_IDS}")
     texts = resolve_texts(materials, captions, text_source)
-    text_key = "raw" if text_source == "raw" else f"caption-{captions.content_hash[:16]}"
+    if text_source == "caption":
+        text_key = f"caption-{captions.content_hash[:16]}"
+    else:
+        text_key = text_source  # raw + ablation variants each get their own cache
     if spec_id == "bm25-both":
         return Bm25Strategy(spec_id, materials, idf_side="both", texts=texts)
     if spec_id == "bm25-query":
@@ -348,8 +404,11 @@ def config_hash(spec: dict) -> str:
 
 
 def corpus_label(spec: dict) -> str:
-    """Human-facing corpus name: 'raw' or 'caption:<model>'."""
-    if str(spec.get("text_source", "raw")) == "raw":
+    """Human-facing corpus name: 'raw', an ablation variant, or 'caption:<model>'."""
+    source = str(spec.get("text_source", "raw"))
+    if source == "raw":
         return "raw"
-    model = str(spec.get("captions_model") or spec.get("captions_version") or "caption")
-    return f"caption:{model}"
+    if source == "caption":
+        model = str(spec.get("captions_model") or spec.get("captions_version") or "caption")
+        return f"caption:{model}"
+    return source  # raw-title / raw-title-desc / raw-tags-df5 / raw-tags-df10

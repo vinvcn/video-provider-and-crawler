@@ -155,15 +155,25 @@ def render_markdown(report: dict) -> str:
         )
     lines += ["", "## 配对 bootstrap(主分差,95% CI,B=1000)", ""]
     if report["pairwise"]:
+        # 27+ runs make the full matrix unreadable in markdown: show the
+        # champion vs everyone; every pair stays in summary.json.
+        top_run = report["runs"][0]["scored"]["run_id"]
+        champion_pairs = [
+            pair for pair in report["pairwise"] if pair["a"] == top_run or pair["b"] == top_run
+        ]
         lines.append("| A | B | Δ(A−B) | CI | 结论 |")
         lines.append("|---|---|---|---|---|")
-        for pair in report["pairwise"]:
+        for pair in champion_pairs:
             lo, hi = pair["ci"]
             verdict = {"a": "A 更优", "b": "B 更优", "tie": "无显著差异"}[pair["win"]]
             lines.append(
                 f"| `{pair['a']}` | `{pair['b']}` | {pair['diff']:+.4f} "
                 f"| [{lo:+.4f}, {hi:+.4f}] | {verdict} |"
             )
+        hidden = len(report["pairwise"]) - len(champion_pairs)
+        if hidden:
+            lines.append("")
+            lines.append(f"_(另有 {hidden} 组非冠军组合,见 summary.json)_")
     else:
         lines.append("_(只有一条 run,无对比)_")
     if report.get("calibration"):
