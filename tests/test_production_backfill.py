@@ -31,7 +31,7 @@ def test_select_both_arms_or_the_predicates():
 
 def test_select_shard_restricts_by_hash():
     sql, _ = embed_select_sql(dense=True, sparse=False, shard=0, shards=3)
-    assert "pexels_id % 3 = 0" in sql
+    assert "mod(pexels_id, 3) = 0" in sql
 
 
 def test_select_rejects_bad_shard():

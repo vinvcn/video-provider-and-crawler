@@ -179,7 +179,8 @@ WHERE ({" OR ".join(owed)})
             raise ValueError("shards must be positive")
         if not 0 <= shard < shards:
             raise ValueError(f"shard {shard} out of range 0..{shards - 1}")
-        sql += f"\n  AND pexels_id % {shards} = {shard}"
+        # mod() instead of %: psycopg would treat a literal '%' as a placeholder.
+        sql += f"\n  AND mod(pexels_id, {shards}) = {shard}"
     sql += "\nORDER BY pexels_id\nLIMIT %s"
     params.append("limit")
     return sql, params
