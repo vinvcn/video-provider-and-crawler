@@ -312,7 +312,8 @@ def cmd_search(args: argparse.Namespace) -> int:
     bm25: Bm25Model = sparse_provider.model  # type: ignore[assignment]
     conn = db.connect(settings.db_dsn)
     try:
-        conn.execute("SET hnsw.ef_search = %s", (str(args.ef_search),))
+        # GUC assignments do not accept bind parameters; ef_search is an int.
+        conn.execute(f"SET hnsw.ef_search = {int(args.ef_search)}")
         conn.execute("SET hnsw.iterative_scan = 'relaxed_order'")
         hard, hard_params = _search_hard_filter(args)
         hard_sql = (" AND ".join(hard) + " AND ") if hard else ""
@@ -344,11 +345,14 @@ def cmd_search(args: argparse.Namespace) -> int:
         weights = bm25.query_weights(args.q)
         if weights:
             start = _time.perf_counter()
+            # The ORDER BY expression must textually match the expression
+            # index (sparse_embedding::sparsevec(1000000000)) so the planner
+            # uses it; a bare column reference would seq-scan.
             rows = conn.execute(
                 f"""
                 SELECT pexels_id FROM stock_videos
                 WHERE {hard_sql}sparse_embedding IS NOT NULL
-                ORDER BY sparse_embedding <#> %s::sparsevec
+                ORDER BY sparse_embedding::sparsevec(1000000000) <#> %s::sparsevec
                 LIMIT %s
                 """,
                 (*hard_params, to_sparsevec_literal(weights), args.depth),
