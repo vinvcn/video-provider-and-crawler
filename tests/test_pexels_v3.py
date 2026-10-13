@@ -51,6 +51,23 @@ def test_normalize_core_fields():
     assert row["raw"] == FIXTURE
 
 
+def test_normalize_reads_object_tags():
+    row = normalize_video(
+        {
+            **FIXTURE,
+            "tags": [
+                {"name": "Welder", "search_term": "welder"},
+                "spark",
+                {"search_term": "arc welding"},
+                {"name": "   "},
+                "",
+                None,
+            ],
+        }
+    )
+    assert row["tags"] == ["Welder", "spark", "arc welding"]
+
+
 def test_orientation_variants():
     assert normalize_video({**FIXTURE, "width": 1920, "height": 1080})["orientation"] == "landscape"
     assert normalize_video({**FIXTURE, "width": 100, "height": 100})["orientation"] == "square"

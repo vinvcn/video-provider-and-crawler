@@ -42,7 +42,11 @@ ON CONFLICT (pexels_id) DO UPDATE SET
     source = EXCLUDED.source,
     raw = EXCLUDED.raw,
     updated_at = NOW()
+WHERE stock_videos.raw IS DISTINCT FROM EXCLUDED.raw
 """
+# The WHERE guard makes replayed, byte-identical records a no-op: no heap
+# rewrite, no index churn, no updated_at bump. `raw` holds the full source
+# payload, so it is a faithful change detector for every derived column.
 
 
 def connect(dsn: str | None = None) -> psycopg.Connection:
@@ -75,6 +79,7 @@ def upsert_videos(conn: psycopg.Connection, rows: Iterable[dict[str, Any]]) -> i
 
 
 _CATALOG_TABLES = {"videos": "catalog_videos", "queries": "catalog_queries"}
+
 
 def count_catalog(conn: psycopg.Connection, kind: str) -> int:
     """Row count of the catalog table backing a sitemap kind (videos|queries)."""
@@ -151,9 +156,7 @@ WHERE pexels_id = %s
 """
 
 
-def embed_pending(
-    conn: psycopg.Connection, provider: Any, limit: int = 1000
-) -> dict[str, Any]:
+def embed_pending(conn: psycopg.Connection, provider: Any, limit: int = 1000) -> dict[str, Any]:
     """Backfill embedding columns for rows not yet embedded with `provider`.
 
     Vectors travel as pgvector text literals cast in SQL, so no extra database
@@ -213,11 +216,31 @@ def catalog_gap(
     sql = f"""
         SELECT c.pexels_id, c.slug
         FROM catalog_videos c
-        WHERE NOT EXISTS (SELECT 1 FROM stock_videos s WHERE s.pexels_id = c.pexels_id)
+        WHERE c.missing_since IS NULL
+          AND NOT EXISTS (SELECT 1 FROM stock_videos s WHERE s.pexels_id = c.pexels_id)
         ORDER BY {clause}
         LIMIT %s
     """
     return [(int(row[0]), row[1]) for row in conn.execute(sql, (limit,)).fetchall()]
+
+
+def mark_catalog_missing(conn: psycopg.Connection, pexels_ids: Iterable[int]) -> int:
+    """Flag catalog rows whose video is gone (deleted/unlisted); returns newly marked."""
+    ids = list(pexels_ids)
+    if not ids:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE catalog_videos
+            SET missing_since = NOW()
+            WHERE pexels_id = ANY(%s) AND missing_since IS NULL
+            """,
+            (ids,),
+        )
+        marked = cur.rowcount
+    conn.commit()
+    return marked
 
 
 def stats(conn: psycopg.Connection) -> dict[str, Any]:

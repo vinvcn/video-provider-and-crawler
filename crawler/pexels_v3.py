@@ -71,6 +71,18 @@ def _thumbnail_url(video: Any) -> str | None:
     return preview if isinstance(preview, str) and preview else None
 
 
+def _tag_text(tag: Any) -> str | None:
+    """Tag payloads arrive as plain strings or {name, search_term} objects."""
+    if tag is None:
+        return None
+    if isinstance(tag, dict):
+        value = tag.get("name") or tag.get("search_term")
+        text = str(value).strip() if value else ""
+    else:
+        text = str(tag).strip()
+    return text or None
+
+
 def normalize_video(attrs: dict[str, Any]) -> dict[str, Any]:
     """Map one v3 `attributes` object to a stock_videos row (dict)."""
     video = attrs.get("video") if isinstance(attrs.get("video"), dict) else {}
@@ -80,7 +92,7 @@ def normalize_video(attrs: dict[str, Any]) -> dict[str, Any]:
         "slug": attrs.get("slug"),
         "title": attrs.get("title"),
         "description": attrs.get("description"),
-        "tags": [str(tag) for tag in (attrs.get("tags") or []) if tag],
+        "tags": [text for text in (_tag_text(tag) for tag in (attrs.get("tags") or [])) if text],
         "duration": attrs.get("duration"),
         "width": attrs.get("width"),
         "height": attrs.get("height"),
