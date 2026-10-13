@@ -5,10 +5,10 @@ TERMS ?= panda,ocean sunrise,city night,forest
 POOL ?= 4
 KIND ?= all
 
-.PHONY: sync test lint fmt up down migrate fetch-seed fetch-search fetch-sitemaps ingest status
+.PHONY: sync test lint fmt up down migrate fetch-seed fetch-search fetch-sitemaps ingest status service
 
 sync:
-	uv sync --extra dev
+	uv sync --extra dev --extra service
 
 test:
 	uv run pytest -q
@@ -43,3 +43,9 @@ ingest:
 
 status:
 	uv run vpc status
+
+HOST ?= 127.0.0.1
+PORT ?= 8787
+
+service:
+	uv run uvicorn service.app:app --host $(HOST) --port $(PORT)

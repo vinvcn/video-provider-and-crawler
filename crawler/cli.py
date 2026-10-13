@@ -280,145 +280,26 @@ def cmd_bm25_fit(args: argparse.Namespace) -> int:
     return 0
 
 
-def _search_hard_filter(args: argparse.Namespace) -> tuple[list[str], list[object]]:
-    """WHERE fragments + params for the structured (hard) constraints."""
-    where: list[str] = []
-    params: list[object] = []
-    if args.orientation:
-        where.append("orientation = %s")
-        params.append(args.orientation)
-    if args.min_duration is not None:
-        where.append("duration >= %s")
-        params.append(args.min_duration)
-    if args.max_duration is not None:
-        where.append("duration <= %s")
-        params.append(args.max_duration)
-    if args.min_width is not None:
-        where.append("width >= %s")
-        params.append(args.min_width)
-    if args.license:
-        where.append("license = %s")
-        params.append(args.license)
-    return where, params
-
-
 def cmd_search(args: argparse.Namespace) -> int:
-    from store.bm25 import Bm25Model
-    from store.embedding import to_sparsevec_literal, to_vector_literal
+    from store.search import reset_caches, search_library
 
-    settings = load_settings()
-    dense_provider = embedding.get_provider(args.dense_model)
-    sparse_provider = embedding.get_provider("bm25")
-    bm25: Bm25Model = sparse_provider.model  # type: ignore[assignment]
-    conn = db.connect(settings.db_dsn)
+    load_settings()  # .env -> environ for the provider and DSN
     try:
-        # GUC assignments do not accept bind parameters; ef_search is an int.
-        conn.execute(f"SET hnsw.ef_search = {int(args.ef_search)}")
-        conn.execute("SET hnsw.iterative_scan = 'relaxed_order'")
-        hard, hard_params = _search_hard_filter(args)
-        hard_sql = (" AND ".join(hard) + " AND ") if hard else ""
-
-        dense_ms = 0.0
-        sparse_ms = 0.0
-        dense_hits: list[int] = []
-        sparse_hits: list[int] = []
-
-        import time as _time
-
-        start = _time.perf_counter()
-        query_vector = dense_provider.dense_text([args.q])[0]
-        dense_ms = (_time.perf_counter() - start) * 1000
-
-        start = _time.perf_counter()
-        rows = conn.execute(
-            f"""
-            SELECT pexels_id FROM stock_videos
-            WHERE {hard_sql}embedding IS NOT NULL
-            ORDER BY embedding <=> %s::vector
-            LIMIT %s
-            """,
-            (*hard_params, to_vector_literal(query_vector), args.depth),
-        ).fetchall()
-        dense_hits = [row[0] for row in rows]
-        dense_ms += (_time.perf_counter() - start) * 1000
-
-        weights = bm25.query_weights(args.q)
-        if weights:
-            start = _time.perf_counter()
-            # The ORDER BY expression must textually match the expression
-            # index (sparse_embedding::sparsevec(1000000000)) so the planner
-            # uses it; a bare column reference would seq-scan.
-            rows = conn.execute(
-                f"""
-                SELECT pexels_id FROM stock_videos
-                WHERE {hard_sql}sparse_embedding IS NOT NULL
-                ORDER BY sparse_embedding::sparsevec(1000000000) <#> %s::sparsevec
-                LIMIT %s
-                """,
-                (*hard_params, to_sparsevec_literal(weights), args.depth),
-            ).fetchall()
-            sparse_hits = [row[0] for row in rows]
-            sparse_ms += (_time.perf_counter() - start) * 1000
-
-        # RRF (k=60): rank-position voting, no score calibration needed.
-        rrf_k = 60
-        scores: dict[int, float] = {}
-        for hits in (dense_hits, sparse_hits):
-            for rank, pexels_id in enumerate(hits, start=1):
-                scores[pexels_id] = scores.get(pexels_id, 0.0) + 1.0 / (rrf_k + rank)
-        top_ids = sorted(scores, key=lambda pid: (-scores[pid], pid))[: args.k]
-        if not top_ids:
-            print(
-                json.dumps(
-                    {
-                        "query": args.q,
-                        "hits": [],
-                        "arms": {"dense": len(dense_hits), "sparse": len(sparse_hits)},
-                    }
-                )
-            )
-            return 0
-
-        rows = conn.execute(
-            """
-            SELECT pexels_id, title, duration, width, height, orientation,
-                   thumbnail_path, thumbnail_url
-            FROM stock_videos WHERE pexels_id = ANY(%s)
-            """,
-            (top_ids,),
-        ).fetchall()
-        by_id = {row[0]: row for row in rows}
-        hits = [
-            {
-                "pexels_id": pid,
-                "rrf": round(scores[pid], 6),
-                "title": by_id[pid][1],
-                "duration": by_id[pid][2],
-                "width": by_id[pid][3],
-                "height": by_id[pid][4],
-                "orientation": by_id[pid][5],
-                "thumbnail_path": by_id[pid][6],
-                "thumbnail_url": by_id[pid][7],
-            }
-            for pid in top_ids
-            if pid in by_id
-        ]
-        print(
-            json.dumps(
-                {
-                    "query": args.q,
-                    "hits": hits,
-                    "arms": {"dense": len(dense_hits), "sparse": len(sparse_hits)},
-                    "latency_ms": {"dense": round(dense_ms, 1), "sparse": round(sparse_ms, 1)},
-                },
-                ensure_ascii=False,
-            )
+        result = search_library(
+            args.q,
+            k=args.k,
+            depth=args.depth,
+            ef_search=args.ef_search,
+            orientation=args.orientation,
+            min_duration=args.min_duration,
+            max_duration=args.max_duration,
+            min_width=args.min_width,
+            license=args.license,
+            dense_model=args.dense_model,
         )
     finally:
-        close = getattr(dense_provider, "close", None)
-        if callable(close):
-            close()
-        conn.close()
+        reset_caches()  # one-shot process: close the shared provider pool
+    print(json.dumps(result, ensure_ascii=False))
     return 0
 
 
