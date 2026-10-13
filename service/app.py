@@ -16,14 +16,54 @@ hangs. `GET /healthz` reports index coverage for readiness probes.
 
 from __future__ import annotations
 
+import json
+import os
+import time
+from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict, Field
 
-from crawler.config import load_settings
+from crawler.config import REPO_ROOT, load_settings
 from store import db
 from store.search import resolve_query, search_library
+
+load_settings()  # .env -> environ once, before any provider/DSN read
+
+
+def _warm_indexes() -> None:
+    """Touch both HNSW graphs once so the day's first real query avoids cold I/O.
+
+    A tiny uniform vector and a single-term sparsevec still traverse the
+    graph; failures are ignored (warmup must never block startup).
+    """
+    try:
+        dense_literal = "[" + ",".join(["0.01"] * 1024) + "]"
+        conn = db.connect()
+        try:
+            conn.execute(
+                "SELECT pexels_id FROM stock_videos WHERE embedding IS NOT NULL "
+                "ORDER BY embedding <=> %s::vector LIMIT 1",
+                (dense_literal,),
+            ).fetchall()
+            conn.execute(
+                "SELECT pexels_id FROM stock_videos WHERE sparse_embedding IS NOT NULL "
+                "ORDER BY sparse_embedding::sparsevec(1000000000) <#> "
+                "'{1:1.0}/1000000000'::sparsevec LIMIT 1"
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception:  # warmup is best-effort
+        pass
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    _warm_indexes()
+    yield
+
 
 app = FastAPI(
     title="vpc-retrieval",
@@ -34,8 +74,8 @@ app = FastAPI(
         "Repeated query texts hit an embedding cache; excluded URLs are "
         "dropped and backfilled so k still fills."
     ),
+    lifespan=lifespan,
 )
-load_settings()  # .env -> environ once, before any provider/DSN read
 
 
 class SearchRequest(BaseModel):
@@ -118,6 +158,37 @@ class HealthStatus(BaseModel):
     sparse: int
 
 
+def _log_query(request: SearchRequest, result: dict[str, Any]) -> None:
+    """Append one JSONL line per lookup; logging never fails a search.
+
+    Feeds future relevance tuning (what creators actually search, which
+    latency stage dominates). Disable with VPC_QUERY_LOG=0; redirect the
+    file with VPC_QUERY_LOG_PATH.
+    """
+    if os.environ.get("VPC_QUERY_LOG", "1") != "1":
+        return
+    path = Path(
+        os.environ.get("VPC_QUERY_LOG_PATH", str(REPO_ROOT / "storage" / "logs" / "queries.jsonl"))
+    )
+    try:
+        record = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "q": result["query"],
+            "k": request.k,
+            "orientation": request.orientation,
+            "min_duration": request.min_duration,
+            "exclude": len(request.exclude_urls),
+            "arms": result["arms"],
+            "latency_ms": result["latency_ms"],
+            "top": [hit["pexels_id"] for hit in result["hits"][:10]],
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:  # the query log must never break search
+        pass
+
+
 @app.get(
     "/healthz", response_model=HealthStatus, tags=["health"], summary="Index coverage counters"
 )
@@ -147,7 +218,7 @@ def healthz() -> HealthStatus:
 def search(request: SearchRequest) -> dict[str, Any]:
     """Top-k hybrid hits; vectors included for the dedup gate."""
     q = resolve_query(request.terms, request.coarse_query)
-    return search_library(
+    result = search_library(
         q,
         k=request.k,
         orientation=request.orientation,
@@ -158,3 +229,5 @@ def search(request: SearchRequest) -> dict[str, Any]:
         include_vector=True,
         exclude_urls=set(request.exclude_urls) or None,
     )
+    _log_query(request, result)
+    return result

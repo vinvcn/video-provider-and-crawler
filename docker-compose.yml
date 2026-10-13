@@ -1,18 +1,49 @@
 # stock-db 服务已迁移说明（2026-10-07）
+#
+# 本项目的 PostgreSQL（pgvector，服务名 `stock-db`，容器 `vpc-stock-db`）已迁入
+# 全机器共享的中间件基建 $HOME/infrastructure/middleware/dev（compose 项目名 dev-middleware）。
+#
+#   - 容器：dev-middleware-stock-db，镜像 pgvector/pgvector:pg16
+#   - 连接信息保持不变：postgresql://postgres:postgres@127.0.0.1:15433/stock
+#   - 容器网络内（dev-middleware_data-platform）：stock-db:5432
+#   - 原数据卷 video-provider-and-crawler_stock-db-data 已迁入
+#     dev-middleware_stock_db_data，旧卷保留为备份，确认无误后可删除。
+#
+# 启动共享基建：
+#   cd $HOME/infrastructure/middleware/dev
+#   docker compose --env-file .env -f compose.yaml up -d stock-db
+#
+# retrieval 服务（2026-10-13 起）
+#
+# 检索 API 容器化：与 stock-db 同在共享网络 dev-middleware_data-platform，
+# 下游（MoneyPrinterTurbo 容器）在容器网络内直接访问 http://vpc-retrieval:8787。
+#
+#   docker compose up -d retrieval --build   # 本目录
+#   curl -s http://127.0.0.1:8787/healthz    # 宿主机自检
+#
+# 运行时配置来自本目录 .env（env_file）；VPC_DB_DSN 在容器内被覆写为容器网络
+# 地址 stock-db:5432。./storage 挂载进容器：稀疏臂模型 state/bm25-corpus.json
+# 与查询日志 logs/queries.jsonl 都在其中。
 
-本项目的 PostgreSQL（pgvector，服务名 `stock-db`，容器 `vpc-stock-db`）已迁入
-全机器共享的中间件基建 **`$HOME/infrastructure/middleware/dev`**（compose 项目名 `dev-middleware`）。
+services:
+  retrieval:
+    build: .
+    image: vpc-retrieval:local
+    container_name: vpc-retrieval
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # 容器里经共享网络访问 stock-db；覆盖 .env 中的宿主 DSN。
+      VPC_DB_DSN: postgresql://postgres:postgres@stock-db:5432/stock
+    volumes:
+      # bm25-corpus.json（稀疏臂模型）与日志目录。
+      - ./storage:/app/storage
+    ports:
+      - "127.0.0.1:8787:8787"
+    networks:
+      - data-platform
 
-- 容器：`dev-middleware-stock-db`，镜像 `pgvector/pgvector:pg16`
-- 连接信息保持不变：`postgresql://postgres:postgres@127.0.0.1:15433/stock`
-  （代码默认 DSN 与 `VPC_DB_DSN` 环境变量均无需改动）
-- 容器网络内（dev-middleware_data-platform）：`stock-db:5432`
-- 原数据卷 `video-provider-and-crawler_stock-db-data` 已迁入
-  `dev-middleware_stock_db_data`，旧卷保留为备份，确认无误后可删除。
-
-启动共享基建：
-
-```bash
-cd $HOME/infrastructure/middleware/dev
-docker compose --env-file .env -f compose.yaml up -d stock-db
-```
+networks:
+  data-platform:
+    external: true
+    name: dev-middleware_data-platform
