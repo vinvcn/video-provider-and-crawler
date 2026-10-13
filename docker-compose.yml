@@ -40,8 +40,23 @@ services:
       - ./storage:/app/storage
     ports:
       - "127.0.0.1:8787:8787"
+    # 以宿主 pc 用户（uid 1000）运行：容器写 storage/logs/queries.jsonl
+    # 不会落地为 root 属主，宿主工具可直接轮转/追加。
+    user: "1000:1000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/healthz', timeout=4)"
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
     networks:
       - data-platform
+    # 与 vbl 栈（video-gen-business-layer 的 retrieval 服务）二选一运行：
+    # 两者同占宿主 8787 且共用 vpc-retrieval 网络别名。
 
 networks:
   data-platform:

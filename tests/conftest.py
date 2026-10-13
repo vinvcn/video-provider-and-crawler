@@ -11,6 +11,12 @@ from bench.materials import Materials
 from bench.queries import QuerySet
 
 
+@pytest.fixture(autouse=True)
+def _silence_query_log(monkeypatch):
+    """Tests must not append fake hits to the real storage/logs/queries.jsonl."""
+    monkeypatch.setenv("VPC_QUERY_LOG", "0")
+
+
 def material_row(
     doc_id: int,
     title: str,

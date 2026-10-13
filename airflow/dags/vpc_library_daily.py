@@ -86,6 +86,7 @@ def _remote(args: str) -> str:
     tags=["vpc", "pexels", "incremental"],
 )
 def vpc_library_daily():
+    """定义素材库每日增量任务链（sitemaps → head → ids → ingest → 嵌入）。"""
     fetch_sitemaps = BashOperator(
         task_id="fetch_sitemaps",
         bash_command=_vpc("fetch-sitemaps --kind videos"),

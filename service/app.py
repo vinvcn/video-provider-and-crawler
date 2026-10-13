@@ -17,6 +17,7 @@ hangs. `GET /healthz` reports index coverage for readiness probes.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from contextlib import asynccontextmanager
@@ -28,7 +29,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from crawler.config import REPO_ROOT, load_settings
 from store import db
+from store.embedding import SPARSE_DIM, to_sparsevec_literal, to_vector_literal
+from store.remote_embedding import DEFAULT_DIM
 from store.search import resolve_query, search_library
+
+logger = logging.getLogger("vpc.retrieval")
 
 load_settings()  # .env -> environ once, before any provider/DSN read
 
@@ -37,10 +42,11 @@ def _warm_indexes() -> None:
     """Touch both HNSW graphs once so the day's first real query avoids cold I/O.
 
     A tiny uniform vector and a single-term sparsevec still traverse the
-    graph; failures are ignored (warmup must never block startup).
+    graph; failures are logged and ignored (warmup must never block startup).
     """
     try:
-        dense_literal = "[" + ",".join(["0.01"] * 1024) + "]"
+        dense_literal = to_vector_literal([0.01] * DEFAULT_DIM)
+        sparse_literal = to_sparsevec_literal({1: 1.0})
         conn = db.connect()
         try:
             conn.execute(
@@ -50,13 +56,14 @@ def _warm_indexes() -> None:
             ).fetchall()
             conn.execute(
                 "SELECT pexels_id FROM stock_videos WHERE sparse_embedding IS NOT NULL "
-                "ORDER BY sparse_embedding::sparsevec(1000000000) <#> "
-                "'{1:1.0}/1000000000'::sparsevec LIMIT 1"
+                f"ORDER BY sparse_embedding::sparsevec({SPARSE_DIM}) <#> %s::sparsevec "
+                "LIMIT 1",
+                (sparse_literal,),
             ).fetchall()
         finally:
             conn.close()
-    except Exception:  # warmup is best-effort
-        pass
+    except Exception as exc:  # warmup is best-effort; never block startup
+        logger.debug("index warmup skipped: %s", exc)
 
 
 @asynccontextmanager
@@ -185,8 +192,8 @@ def _log_query(request: SearchRequest, result: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except Exception:  # the query log must never break search
-        pass
+    except Exception as exc:  # the query log must never break search
+        logger.debug("query log write skipped: %s", exc)
 
 
 @app.get(

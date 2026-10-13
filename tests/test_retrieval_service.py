@@ -177,6 +177,7 @@ def test_query_log_written(tmp_path, monkeypatch):
     monkeypatch.setattr(app_module, "search_library", lambda q, **kw: _fake_result(q))
     log_path = tmp_path / "queries.jsonl"
     monkeypatch.setenv("VPC_QUERY_LOG_PATH", str(log_path))
+    monkeypatch.setenv("VPC_QUERY_LOG", "1")  # conftest disables it suite-wide
     client = TestClient(app_module.app)
 
     assert client.post("/search", json={"terms": ["ocean"], "k": 1}).status_code == 200
