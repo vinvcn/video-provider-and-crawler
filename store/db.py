@@ -131,46 +131,88 @@ def upsert_catalog_queries(conn: psycopg.Connection, rows: Iterable[tuple[str, s
     return len(batch)
 
 
-_EMBED_SELECT_SQL = """
-SELECT pexels_id, title, description, tags
-FROM stock_videos
-WHERE embedding_model IS DISTINCT FROM %s
-  AND (
-      COALESCE(title, '') <> ''
-      OR COALESCE(description, '') <> ''
-      OR cardinality(tags) > 0
-  )
-ORDER BY pexels_id
-LIMIT %s
-"""
+_EMBED_TEXT_FILTER_SQL = """(
+    btrim(COALESCE(title, '')) <> ''
+    OR btrim(COALESCE(description, '')) <> ''
+    OR cardinality(tags) > 0
+)"""
 
 _EMBED_UPDATE_SQL = """
 UPDATE stock_videos SET
     embed_text = %s,
-    embedding = %s::vector,
-    embedding_model = %s,
-    embedded_at = NOW(),
-    sparse_embedding = %s::sparsevec,
-    sparse_model = %s
+    embedding = COALESCE(%s::vector, embedding),
+    embedding_model = COALESCE(%s, embedding_model),
+    sparse_embedding = COALESCE(%s::sparsevec, sparse_embedding),
+    sparse_model = COALESCE(%s, sparse_model),
+    embedded_at = NOW()
 WHERE pexels_id = %s
 """
 
 
-def embed_pending(conn: psycopg.Connection, provider: Any, limit: int = 1000) -> dict[str, Any]:
+def embed_select_sql(
+    dense: bool, sparse: bool, shard: int | None = None, shards: int = 3
+) -> tuple[str, list[str]]:
+    """(sql, param_names) for the rows a provider still owes vectors for.
+
+    Selection follows the provider's modalities: a dense-only provider tracks
+    `embedding_model`, a sparse-only one tracks `sparse_model`, so the two
+    production backfills never re-select (or clobber) each other. `shard`
+    restricts to `pexels_id % shards == shard` for incremental index builds.
+    """
+    owed: list[str] = []
+    params: list[str] = []
+    if dense:
+        owed.append("embedding_model IS DISTINCT FROM %s")
+        params.append("model")
+    if sparse:
+        owed.append("sparse_model IS DISTINCT FROM %s")
+        params.append("model")
+    if not owed:
+        raise ValueError("provider supports neither dense_text nor sparse_text")
+    sql = f"""
+SELECT pexels_id, title, description, tags
+FROM stock_videos
+WHERE ({" OR ".join(owed)})
+  AND {_EMBED_TEXT_FILTER_SQL}"""
+    if shard is not None:
+        if shards < 1:
+            raise ValueError("shards must be positive")
+        if not 0 <= shard < shards:
+            raise ValueError(f"shard {shard} out of range 0..{shards - 1}")
+        sql += f"\n  AND pexels_id % {shards} = {shard}"
+    sql += "\nORDER BY pexels_id\nLIMIT %s"
+    params.append("limit")
+    return sql, params
+
+
+def embed_pending(
+    conn: psycopg.Connection,
+    provider: Any,
+    limit: int = 1000,
+    shard: int | None = None,
+    shards: int = 3,
+) -> dict[str, Any]:
     """Backfill embedding columns for rows not yet embedded with `provider`.
 
     Vectors travel as pgvector text literals cast in SQL, so no extra database
-    adapter dependency is required. Rows with empty canonical text are excluded
-    by the selection filter, so they are never re-selected.
+    adapter dependency is required. The UPDATE coalesces, so a dense-only
+    provider leaves the sparse columns (and vice versa) untouched — the two
+    production passes (bge-m3 dense, local BM25 sparse) compose. Rows whose
+    canonical text is empty are excluded by the selection filter, so they are
+    never re-selected.
     """
     from store.embedding import build_embed_text, to_sparsevec_literal, to_vector_literal
 
-    rows = conn.execute(_EMBED_SELECT_SQL, (provider.spec.model_id, limit)).fetchall()
-    if not rows:
-        return {"embedded": 0, "model": provider.spec.model_id}
-
     dense_ok = "dense_text" in provider.spec.supports
     sparse_ok = "sparse_text" in provider.spec.supports
+    sql, _params = embed_select_sql(dense_ok, sparse_ok, shard=shard, shards=shards)
+    model = provider.spec.model_id
+
+    model_params = [model] * (int(dense_ok) + int(sparse_ok))
+    rows = conn.execute(sql, (*model_params, limit)).fetchall()
+    if not rows:
+        return {"embedded": 0, "model": model}
+
     step = max(1, provider.spec.max_batch)
     embedded = 0
     for start in range(0, len(rows), step):
@@ -179,8 +221,20 @@ def embed_pending(conn: psycopg.Connection, provider: Any, limit: int = 1000) ->
             build_embed_text({"title": row[1], "description": row[2], "tags": row[3]})
             for row in chunk
         ]
-        dense = provider.dense_text(texts) if dense_ok else [None] * len(chunk)
-        sparse = provider.sparse_text(texts) if sparse_ok else [None] * len(chunk)
+        # Only send non-empty texts to the provider (empty input would make the
+        # remote endpoint reject the batch); empty rows still record the model
+        # id below so they are never re-selected.
+        live = [index for index, text in enumerate(texts) if text]
+        dense: list[Any] = [None] * len(chunk)
+        sparse: list[Any] = [None] * len(chunk)
+        if dense_ok and live:
+            vectors = provider.dense_text([texts[index] for index in live])
+            for index, vector in zip(live, vectors, strict=True):
+                dense[index] = vector
+        if sparse_ok and live:
+            weights = provider.sparse_text([texts[index] for index in live])
+            for index, weight in zip(live, weights, strict=True):
+                sparse[index] = weight
         with conn.cursor() as cur:
             for row, text, vector, weights in zip(chunk, texts, dense, sparse, strict=True):
                 cur.execute(
@@ -188,15 +242,15 @@ def embed_pending(conn: psycopg.Connection, provider: Any, limit: int = 1000) ->
                     (
                         text,
                         to_vector_literal(vector) if vector is not None else None,
-                        provider.spec.model_id if vector is not None else None,
+                        model if dense_ok else None,
                         to_sparsevec_literal(weights) if weights else None,
-                        provider.spec.model_id if weights else None,
+                        model if sparse_ok else None,
                         row[0],
                     ),
                 )
         conn.commit()
         embedded += len(chunk)
-    return {"embedded": embedded, "model": provider.spec.model_id}
+    return {"embedded": embedded, "model": model}
 
 
 _CATALOG_GAP_ORDER = {

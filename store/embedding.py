@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -110,8 +111,8 @@ class HashEmbeddingProvider:
 
     spec: EmbeddingSpec = field(
         default_factory=lambda: EmbeddingSpec(
-            model_id="local-hash-768",
-            dim=768,
+            model_id="local-hash-1024",
+            dim=1024,
             supports=frozenset({"dense_text", "sparse_text"}),
         )
     )
@@ -160,9 +161,37 @@ def to_sparsevec_literal(weights: Mapping[int, float], dim: int = SPARSE_DIM) ->
 
 
 def get_provider(name: str) -> EmbeddingProvider:
-    """Resolve a provider name; local hash is the offline/dev default."""
-    providers: dict[str, type] = {"hash": HashEmbeddingProvider}
-    try:
-        return providers[name]()  # type: ignore[return-value]
-    except KeyError as exc:
-        raise ValueError(f"unknown embedding provider: {name}") from exc
+    """Resolve a provider name; local hash is the offline/dev default.
+
+    Production registry (docs/phase2-index-design-2026-10-08.md):
+      - "hash"    — deterministic offline provider (pipeline smoke tests)
+      - "bge-m3"  — remote dense via SiliconFlow-compatible endpoint (VPC_EMBED_*)
+      - "bm25"    — local sparse arm; needs a fitted corpus model
+                    (VPC_BM25_MODEL, written by `vpc bm25-fit`)
+    """
+    if name == "hash":
+        return HashEmbeddingProvider()
+    if name == "bge-m3":
+        from store.remote_embedding import RemoteEmbeddingProvider
+
+        return RemoteEmbeddingProvider()
+    if name == "bm25":
+        from pathlib import Path
+
+        from store.bm25 import Bm25Model, Bm25SparseProvider
+
+        path = Path(os.environ.get("VPC_BM25_MODEL", "storage/state/bm25-corpus.json"))
+        if not path.exists():
+            raise ValueError(f"no fitted BM25 model at {path}; run `vpc bm25-fit` first")
+        model = Bm25Model.load(path)
+        return Bm25SparseProvider(
+            model=model,
+            spec=EmbeddingSpec(
+                # Versioned id: a re-fit with different statistics needs a new
+                # version here, or already-embedded rows will not re-embed.
+                model_id=f"local-bm25-{model.idf_side}-v1",
+                dim=0,
+                supports=frozenset({"sparse_text"}),
+            ),
+        )
+    raise ValueError(f"unknown embedding provider: {name}")

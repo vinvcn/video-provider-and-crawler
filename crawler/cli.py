@@ -218,8 +218,195 @@ def cmd_embed(args: argparse.Namespace) -> int:
     provider = embedding.get_provider(args.model)
     conn = db.connect(settings.db_dsn)
     try:
-        print(json.dumps(db.embed_pending(conn, provider, limit=args.limit), ensure_ascii=False))
+        result = db.embed_pending(
+            conn, provider, limit=args.limit, shard=args.shard, shards=args.shards
+        )
+        result["shard"] = args.shard
+        result["shards"] = args.shards
+        print(json.dumps(result, ensure_ascii=False))
     finally:
+        close = getattr(provider, "close", None)
+        if callable(close):
+            close()
+        conn.close()
+    return 0
+
+
+def cmd_bm25_fit(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from store.bm25 import Bm25Model
+    from store.embedding import build_embed_text
+
+    settings = load_settings()
+    model = Bm25Model(idf_side=args.idf_side)
+    conn = db.connect(settings.db_dsn)
+    try:
+        fitted = 0
+        # Server-side cursor: streams 665k rows without holding them in RAM.
+        with conn.cursor(name="vpc_bm25_fit") as cur:
+            cur.itersize = 5000
+            cur.execute("SELECT title, description, tags FROM stock_videos")
+            while True:
+                rows = cur.fetchmany(cur.itersize)
+                if not rows:
+                    break
+                model.fit(
+                    build_embed_text({"title": t, "description": d, "tags": g}) for t, d, g in rows
+                )
+                fitted += len(rows)
+        out = Path(args.out) if args.out else settings.state_dir / "bm25-corpus.json"
+        model.save(out)
+        print(
+            json.dumps(
+                {
+                    "fitted": fitted,
+                    "idf_side": model.idf_side,
+                    "terms": len(model.term_ids),
+                    "out": str(out),
+                },
+                ensure_ascii=False,
+            )
+        )
+    finally:
+        conn.close()
+    return 0
+
+
+def _search_hard_filter(args: argparse.Namespace) -> tuple[list[str], list[object]]:
+    """WHERE fragments + params for the structured (hard) constraints."""
+    where: list[str] = []
+    params: list[object] = []
+    if args.orientation:
+        where.append("orientation = %s")
+        params.append(args.orientation)
+    if args.min_duration is not None:
+        where.append("duration >= %s")
+        params.append(args.min_duration)
+    if args.max_duration is not None:
+        where.append("duration <= %s")
+        params.append(args.max_duration)
+    if args.min_width is not None:
+        where.append("width >= %s")
+        params.append(args.min_width)
+    if args.license:
+        where.append("license = %s")
+        params.append(args.license)
+    return where, params
+
+
+def cmd_search(args: argparse.Namespace) -> int:
+    from store.bm25 import Bm25Model
+    from store.embedding import to_sparsevec_literal, to_vector_literal
+
+    settings = load_settings()
+    dense_provider = embedding.get_provider(args.dense_model)
+    sparse_provider = embedding.get_provider("bm25")
+    bm25: Bm25Model = sparse_provider.model  # type: ignore[assignment]
+    conn = db.connect(settings.db_dsn)
+    try:
+        conn.execute("SET hnsw.ef_search = %s", (str(args.ef_search),))
+        conn.execute("SET hnsw.iterative_scan = 'relaxed_order'")
+        hard, hard_params = _search_hard_filter(args)
+        hard_sql = (" AND ".join(hard) + " AND ") if hard else ""
+
+        dense_ms = 0.0
+        sparse_ms = 0.0
+        dense_hits: list[int] = []
+        sparse_hits: list[int] = []
+
+        import time as _time
+
+        start = _time.perf_counter()
+        query_vector = dense_provider.dense_text([args.q])[0]
+        dense_ms = (_time.perf_counter() - start) * 1000
+
+        start = _time.perf_counter()
+        rows = conn.execute(
+            f"""
+            SELECT pexels_id FROM stock_videos
+            WHERE {hard_sql}embedding IS NOT NULL
+            ORDER BY embedding <=> %s::vector
+            LIMIT %s
+            """,
+            (*hard_params, to_vector_literal(query_vector), args.depth),
+        ).fetchall()
+        dense_hits = [row[0] for row in rows]
+        dense_ms += (_time.perf_counter() - start) * 1000
+
+        weights = bm25.query_weights(args.q)
+        if weights:
+            start = _time.perf_counter()
+            rows = conn.execute(
+                f"""
+                SELECT pexels_id FROM stock_videos
+                WHERE {hard_sql}sparse_embedding IS NOT NULL
+                ORDER BY sparse_embedding <#> %s::sparsevec
+                LIMIT %s
+                """,
+                (*hard_params, to_sparsevec_literal(weights), args.depth),
+            ).fetchall()
+            sparse_hits = [row[0] for row in rows]
+            sparse_ms += (_time.perf_counter() - start) * 1000
+
+        # RRF (k=60): rank-position voting, no score calibration needed.
+        rrf_k = 60
+        scores: dict[int, float] = {}
+        for hits in (dense_hits, sparse_hits):
+            for rank, pexels_id in enumerate(hits, start=1):
+                scores[pexels_id] = scores.get(pexels_id, 0.0) + 1.0 / (rrf_k + rank)
+        top_ids = sorted(scores, key=lambda pid: (-scores[pid], pid))[: args.k]
+        if not top_ids:
+            print(
+                json.dumps(
+                    {
+                        "query": args.q,
+                        "hits": [],
+                        "arms": {"dense": len(dense_hits), "sparse": len(sparse_hits)},
+                    }
+                )
+            )
+            return 0
+
+        rows = conn.execute(
+            """
+            SELECT pexels_id, title, duration, width, height, orientation,
+                   thumbnail_path, thumbnail_url
+            FROM stock_videos WHERE pexels_id = ANY(%s)
+            """,
+            (top_ids,),
+        ).fetchall()
+        by_id = {row[0]: row for row in rows}
+        hits = [
+            {
+                "pexels_id": pid,
+                "rrf": round(scores[pid], 6),
+                "title": by_id[pid][1],
+                "duration": by_id[pid][2],
+                "width": by_id[pid][3],
+                "height": by_id[pid][4],
+                "orientation": by_id[pid][5],
+                "thumbnail_path": by_id[pid][6],
+                "thumbnail_url": by_id[pid][7],
+            }
+            for pid in top_ids
+            if pid in by_id
+        ]
+        print(
+            json.dumps(
+                {
+                    "query": args.q,
+                    "hits": hits,
+                    "arms": {"dense": len(dense_hits), "sparse": len(sparse_hits)},
+                    "latency_ms": {"dense": round(dense_ms, 1), "sparse": round(sparse_ms, 1)},
+                },
+                ensure_ascii=False,
+            )
+        )
+    finally:
+        close = getattr(dense_provider, "close", None)
+        if callable(close):
+            close()
         conn.close()
     return 0
 
@@ -303,9 +490,42 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_ingest)
 
     p = sub.add_parser("embed", help="backfill embedding columns (Phase 2 seam)")
-    p.add_argument("--model", default="hash", help="embedding provider (hash = local dev provider)")
+    p.add_argument(
+        "--model",
+        default="hash",
+        help="embedding provider (hash | bge-m3 | bm25)",
+    )
     p.add_argument("--limit", type=int, default=1000)
+    p.add_argument(
+        "--shard",
+        type=int,
+        help="only rows with pexels_id %% shards == shard (incremental index builds)",
+    )
+    p.add_argument("--shards", type=int, default=3, help="shard count for --shard")
     p.set_defaults(func=cmd_embed)
+
+    p = sub.add_parser("bm25-fit", help="fit BM25 corpus statistics for the sparse arm")
+    p.add_argument(
+        "--idf-side",
+        choices=["both", "query", "doc"],
+        default="query",
+        help="where the idf factor lives (query = textbook BM25, the eval winner)",
+    )
+    p.add_argument("--out", help="model output path (default storage/state/bm25-corpus.json)")
+    p.set_defaults(func=cmd_bm25_fit)
+
+    p = sub.add_parser("search", help="hybrid retrieval over the indexed library")
+    p.add_argument("--q", required=True, help="natural-language query")
+    p.add_argument("--k", type=int, default=30, help="results to return")
+    p.add_argument("--depth", type=int, default=100, help="per-arm retrieval depth")
+    p.add_argument("--ef-search", type=int, default=100, help="hnsw.ef_search (recall dial)")
+    p.add_argument("--dense-model", default="bge-m3", help="dense query-side provider")
+    p.add_argument("--orientation", choices=["landscape", "portrait", "square"])
+    p.add_argument("--min-duration", type=int)
+    p.add_argument("--max-duration", type=int)
+    p.add_argument("--min-width", type=int)
+    p.add_argument("--license")
+    p.set_defaults(func=cmd_search)
 
     p = sub.add_parser("status", help="library + spool counters")
     p.set_defaults(func=cmd_status)
