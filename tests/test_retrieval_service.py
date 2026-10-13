@@ -111,7 +111,23 @@ def test_search_endpoint_maps_contract(monkeypatch):
         captured.update(kwargs)
         return {
             "query": q,
-            "hits": [{"pexels_id": 1, "rrf": 0.02, "vector1024": [0.0]}],
+            "hits": [
+                {
+                    "pexels_id": 1,
+                    "rrf": 0.02,
+                    "url": "https://www.pexels.com/video/x-1/",
+                    "title": "Waves",
+                    "duration": 10,
+                    "width": 1920,
+                    "height": 1080,
+                    "fps": 24.0,
+                    "orientation": "landscape",
+                    "thumbnail_path": None,
+                    "thumbnail_url": "https://images.pexels.com/t/1.jpeg",
+                    "video_files": [{"link": "https://videos.pexels.com/video-files/1/a.mp4"}],
+                    "vector1024": [0.0],
+                }
+            ],
             "arms": {"dense": 1, "sparse": 0},
             "latency_ms": {"embed_api": 1.0, "dense": 1.0, "sparse": 0.0},
         }
@@ -140,3 +156,26 @@ def test_search_endpoint_maps_contract(monkeypatch):
 
     # out-of-range k is rejected by validation
     assert client.post("/search", json={"k": 0}).status_code == 422
+
+
+def test_openapi_schema_and_docs_page():
+    """The Swagger surface self-documents the full contract."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    import service.app as app_module
+
+    client = TestClient(app_module.app)
+    assert client.get("/docs").status_code == 200
+
+    spec = client.get("/openapi.json").json()
+    assert set(spec["paths"]) == {"/search", "/healthz"}
+    assert spec["paths"]["/search"]["post"]["tags"] == ["search"]
+
+    schemas = spec["components"]["schemas"]
+    hit = schemas["SearchHit"]["properties"]
+    assert {"pexels_id", "url", "video_files", "vector1024"} <= set(hit)
+    request_schema = schemas["SearchRequest"]
+    assert "examples" in request_schema  # clickable sample payloads in Swagger UI
+    assert "exclude_urls" in request_schema["properties"]
+    assert schemas["SearchRequest"]["properties"]["k"]["maximum"] == 100
