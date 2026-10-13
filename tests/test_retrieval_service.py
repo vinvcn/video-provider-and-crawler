@@ -3,6 +3,7 @@
 import pytest
 
 from store.search import (
+    _hydrate_hits,
     hit_url_set,
     pexels_page_url,
     query_vector,
@@ -190,6 +191,60 @@ def test_query_log_written(tmp_path, monkeypatch):
     monkeypatch.setenv("VPC_QUERY_LOG", "0")
     client.post("/search", json={"terms": ["ocean"], "k": 1})
     assert len(log_path.read_text(encoding="utf-8").strip().splitlines()) == 1
+
+
+def test_hydrate_hits_maps_creator_and_parses_vector():
+    """行组装契约：creator 来自 user_name 列；显式位置解析向量文本。"""
+    row = (
+        7,
+        "slug-x",
+        "Title",
+        12,
+        1920,
+        1080,
+        29.97,
+        "landscape",
+        None,
+        "https://images.example/7.jpeg",
+        [{"link": "https://videos.example/7.mp4", "width": 1920, "height": 1080}],
+        "Creator Name",
+        "[0.5, 0.25]",
+    )
+    hits = _hydrate_hits([row], {7: 0.016}, [7], include_vector=True, exclude_urls=None)
+
+    assert len(hits) == 1
+    hit = hits[0]
+    assert hit["creator"] == "Creator Name"
+    assert hit["vector1024"] == [0.5, 0.25]
+    assert hit["url"] == "https://www.pexels.com/video/slug-x-7/"
+    assert hit["rrf"] == 0.016
+
+
+def test_hydrate_hits_drops_excluded_urls():
+    """exclude_urls 命中页面/缩略图/档位任一 URL 时整行丢弃。"""
+    row = (
+        7,
+        "slug-x",
+        "Title",
+        12,
+        1920,
+        1080,
+        29.97,
+        "landscape",
+        None,
+        "https://images.example/7.jpeg",
+        [{"link": "https://videos.example/7.mp4", "width": 1920, "height": 1080}],
+        None,
+    )
+    hits = _hydrate_hits(
+        [row],
+        {7: 0.016},
+        [7],
+        include_vector=False,
+        exclude_urls={"https://videos.example/7.mp4"},
+    )
+
+    assert hits == []
 
 
 def test_openapi_schema_and_docs_page():

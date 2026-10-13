@@ -29,8 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from crawler.config import REPO_ROOT, load_settings
 from store import db
-from store.embedding import SPARSE_DIM, to_sparsevec_literal, to_vector_literal
-from store.remote_embedding import DEFAULT_DIM
+from store.embedding import SPARSE_DIM
 from store.search import resolve_query, search_library
 
 logger = logging.getLogger("vpc.retrieval")
@@ -41,29 +40,40 @@ load_settings()  # .env -> environ once, before any provider/DSN read
 def _warm_indexes() -> None:
     """Touch both HNSW graphs once so the day's first real query avoids cold I/O.
 
-    A tiny uniform vector and a single-term sparsevec still traverse the
-    graph; failures are logged and ignored (warmup must never block startup).
+    Uses a real row's vector as the probe, so no dimension literal can drift
+    from the column type; failures are logged and ignored (warmup must never
+    block startup).
     """
     try:
-        dense_literal = to_vector_literal([0.01] * DEFAULT_DIM)
-        sparse_literal = to_sparsevec_literal({1: 1.0})
         conn = db.connect()
         try:
-            conn.execute(
-                "SELECT pexels_id FROM stock_videos WHERE embedding IS NOT NULL "
-                "ORDER BY embedding <=> %s::vector LIMIT 1",
-                (dense_literal,),
-            ).fetchall()
-            conn.execute(
-                "SELECT pexels_id FROM stock_videos WHERE sparse_embedding IS NOT NULL "
-                f"ORDER BY sparse_embedding::sparsevec({SPARSE_DIM}) <#> %s::sparsevec "
-                "LIMIT 1",
-                (sparse_literal,),
-            ).fetchall()
+            row = conn.execute(
+                "SELECT embedding FROM stock_videos WHERE embedding IS NOT NULL LIMIT 1"
+            ).fetchone()
+            if row is not None and row[0] is not None:
+                probe = row[0] if isinstance(row[0], str) else str(row[0])
+                conn.execute(
+                    "SELECT pexels_id FROM stock_videos WHERE embedding IS NOT NULL "
+                    "ORDER BY embedding <=> %s::vector LIMIT 1",
+                    (probe,),
+                ).fetchall()
+            row = conn.execute(
+                "SELECT sparse_embedding FROM stock_videos "
+                "WHERE sparse_embedding IS NOT NULL LIMIT 1"
+            ).fetchone()
+            if row is not None and row[0] is not None:
+                probe = row[0] if isinstance(row[0], str) else str(row[0])
+                conn.execute(
+                    "SELECT pexels_id FROM stock_videos "
+                    "WHERE sparse_embedding IS NOT NULL "
+                    f"ORDER BY sparse_embedding::sparsevec({SPARSE_DIM}) "
+                    "<#> %s::sparsevec LIMIT 1",
+                    (probe,),
+                ).fetchall()
         finally:
             conn.close()
     except Exception as exc:  # warmup is best-effort; never block startup
-        logger.debug("index warmup skipped: %s", exc)
+        logger.warning("index warmup skipped: %s", exc)
 
 
 @asynccontextmanager

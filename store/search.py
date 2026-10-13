@@ -5,7 +5,8 @@ One search = hard-filter SQL -> dense HNSW arm + sparse BM25 arm -> RRF (k=60)
 repeated creator terms skip the embedding API (~400 ms each).
 
 The sparse arm's ORDER BY must textually match the expression index
-(``sparse_embedding::sparsevec(1000000000)``) or the planner seq-scans; same
+(``sparse_embedding::sparsevec(SPARSE_DIM)`` — interpolated from
+``store.embedding.SPARSE_DIM``) or the planner seq-scans; same
 for the GUC: ``SET`` does not accept bind parameters.
 """
 
@@ -15,7 +16,7 @@ import time
 from typing import Any
 
 from store import db
-from store.embedding import get_provider, to_sparsevec_literal, to_vector_literal
+from store.embedding import SPARSE_DIM, get_provider, to_sparsevec_literal, to_vector_literal
 
 RRF_K = 60
 PAGE_URL = "https://www.pexels.com/video/{slug}-{pexels_id}/"
@@ -79,6 +80,56 @@ def hit_url_set(hit: dict[str, Any]) -> set[str]:
         if link:
             urls.add(link)
     return {url for url in urls if url}
+
+
+def _hydrate_hits(
+    rows: list[tuple[Any, ...]],
+    scores: dict[int, float],
+    top_ids: list[int],
+    *,
+    include_vector: bool,
+    exclude_urls: set[str] | None,
+) -> list[dict[str, Any]]:
+    """Assemble DB rows into hit dicts, in RRF order.
+
+    Column order matches the metadata SELECT in `search_library`
+    (pexels_id, slug, title, duration, width, height, fps, orientation,
+    thumbnail_path, thumbnail_url, video_files, user_name[, embedding]).
+    psycopg returns the unregistered `vector` type as its "[a,b,...]"
+    literal text; parse it without a new dependency. Rows whose page,
+    thumbnail or rendition URL matches `exclude_urls` are dropped.
+    """
+    by_id = {row[0]: row for row in rows}
+    hits: list[dict[str, Any]] = []
+    for pid in top_ids:
+        row = by_id.get(pid)
+        if row is None:
+            continue
+        hit = {
+            "pexels_id": pid,
+            "rrf": round(scores[pid], 6),
+            "url": pexels_page_url(row[1], pid),
+            "title": row[2],
+            "duration": row[3],
+            "width": row[4],
+            "height": row[5],
+            "fps": float(row[6]) if row[6] is not None else None,
+            "orientation": row[7],
+            "thumbnail_path": row[8],
+            "thumbnail_url": row[9],
+            "video_files": row[10],
+            "creator": row[11],
+        }
+        if include_vector:
+            raw = row[12]
+            if isinstance(raw, str):
+                hit["vector1024"] = [float(x) for x in raw.strip("[]").split(",")]
+            else:
+                hit["vector1024"] = list(raw) if raw is not None else None
+        if exclude_urls and hit_url_set(hit) & exclude_urls:
+            continue
+        hits.append(hit)
+    return hits
 
 
 def _hard_filter_sql(
@@ -173,7 +224,7 @@ def search_library(
                 f"""
                 SELECT pexels_id FROM stock_videos
                 WHERE {hard_sql}sparse_embedding IS NOT NULL
-                ORDER BY sparse_embedding::sparsevec(1000000000) <#> %s::sparsevec
+                ORDER BY sparse_embedding::sparsevec({SPARSE_DIM}) <#> %s::sparsevec
                 LIMIT %s
                 """,
                 (*hard_params, to_sparsevec_literal(weights), depth),
@@ -201,37 +252,13 @@ def search_library(
                 """,
                 (top_ids,),
             ).fetchall()
-            by_id = {row[0]: row for row in rows}
-            for pid in top_ids:
-                row = by_id.get(pid)
-                if row is None:
-                    continue
-                hit = {
-                    "pexels_id": pid,
-                    "rrf": round(scores[pid], 6),
-                    "url": pexels_page_url(row[1], pid),
-                    "title": row[2],
-                    "duration": row[3],
-                    "width": row[4],
-                    "height": row[5],
-                    "fps": float(row[6]) if row[6] is not None else None,
-                    "orientation": row[7],
-                    "thumbnail_path": row[8],
-                    "thumbnail_url": row[9],
-                    "video_files": row[10],
-                    "creator": row[11],
-                }
-                if include_vector:
-                    # psycopg returns the unregistered `vector` type as its
-                    # "[a,b,...]" literal text; parse it without a new dep.
-                    raw = row[12]
-                    if isinstance(raw, str):
-                        hit["vector1024"] = [float(x) for x in raw.strip("[]").split(",")]
-                    else:
-                        hit["vector1024"] = list(raw) if raw is not None else None
-                if exclude_urls and hit_url_set(hit) & exclude_urls:
-                    continue
-                hits.append(hit)
+            hits = _hydrate_hits(
+                rows,
+                scores,
+                top_ids,
+                include_vector=include_vector,
+                exclude_urls=exclude_urls,
+            )
         return {
             "query": q,
             "hits": hits[:k],
