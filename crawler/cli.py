@@ -219,10 +219,17 @@ def cmd_embed(args: argparse.Namespace) -> int:
     conn = db.connect(settings.db_dsn)
     try:
         result = db.embed_pending(
-            conn, provider, limit=args.limit, shard=args.shard, shards=args.shards
+            conn,
+            provider,
+            limit=args.limit,
+            shard=args.shard,
+            shards=args.shards,
+            write=args.write,
+            dsn=settings.db_dsn,
         )
         result["shard"] = args.shard
         result["shards"] = args.shards
+        result["write"] = args.write
         print(json.dumps(result, ensure_ascii=False))
     finally:
         close = getattr(provider, "close", None)
@@ -502,6 +509,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="only rows with pexels_id %% shards == shard (incremental index builds)",
     )
     p.add_argument("--shards", type=int, default=3, help="shard count for --shard")
+    p.add_argument(
+        "--write",
+        choices=["legacy", "async"],
+        default="legacy",
+        help="write path: legacy per-row UPDATEs | async batched executemany "
+        "(background connection, synchronous_commit=off, wal_compression=on)",
+    )
     p.set_defaults(func=cmd_embed)
 
     p = sub.add_parser("bm25-fit", help="fit BM25 corpus statistics for the sparse arm")

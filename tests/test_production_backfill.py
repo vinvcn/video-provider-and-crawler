@@ -131,3 +131,104 @@ def test_bm25_provider_registry_loads_fitted_model(tmp_path, monkeypatch):
     weights = provider.sparse_text(["ocean waves"])
     assert all(isinstance(weight, dict) for weight in weights)
     assert weights[0]
+
+
+# --- async write path (thread + queue mechanics, fake connections) ---
+
+
+class _FakeCursor:
+    def __init__(self, conn: "_FakeWriterConn") -> None:
+        self._conn = conn
+
+    def executemany(self, sql: str, params: list[tuple]) -> None:
+        if self._conn.fail_on_write:
+            raise RuntimeError("db write exploded")
+        self._conn.batches.append(list(params))
+
+    def __enter__(self) -> "_FakeCursor":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+class _FakeWriterConn:
+    def __init__(self, fail_on_write: bool = False) -> None:
+        self.gucs: list[str] = []
+        self.batches: list[list[tuple]] = []
+        self.commits = 0
+        self.closed = False
+        self.fail_on_write = fail_on_write
+
+    def execute(self, sql: str) -> None:
+        self.gucs.append(" ".join(sql.split()))
+
+    def commit(self) -> None:
+        self.commits += 1
+
+    def close(self) -> None:
+        self.closed = True
+
+    def cursor(self) -> _FakeCursor:
+        return _FakeCursor(self)
+
+
+class _FakeDenseProvider:
+    """Dense-only provider: one 2-dim vector per input text, batch of 2."""
+
+    from store.embedding import EmbeddingSpec  # noqa: PLC0415
+
+    spec = EmbeddingSpec(
+        model_id="fake-dense@2", dim=2, max_batch=2, supports=frozenset({"dense_text"})
+    )
+
+    def dense_text(self, texts):
+        return [[float(len(text)), 1.0] for text in texts]
+
+
+def _rows(n: int) -> list[tuple]:
+    return [(100 + i, f"title {i}", None, ["tag"]) for i in range(n)]
+
+
+def test_async_write_flushes_ordered_batches_on_background_connection():
+    from store.db import _embed_rows_async
+
+    writer_conn = _FakeWriterConn()
+    embedded = _embed_rows_async(
+        _rows(5),
+        _FakeDenseProvider(),
+        dsn="fake-dsn",
+        model="fake-dense@2",
+        flush_rows=2,
+        queue_depth=2,
+        connect=lambda dsn: writer_conn,
+    )
+    assert embedded == 5
+    # GUCs tuned for a resumable bulk backfill.
+    assert "SET synchronous_commit = off" in writer_conn.gucs
+    assert "SET wal_compression = on" in writer_conn.gucs
+    # 5 rows flushed as ceil(5/2) buffers, committed on the writer connection.
+    ids = [params[-1] for batch in writer_conn.batches for params in batch]
+    assert ids == [100, 101, 102, 103, 104]
+    assert writer_conn.commits == len(writer_conn.batches) == 3
+    assert writer_conn.closed
+
+
+def test_async_write_surfaces_writer_errors():
+    from store.db import _embed_rows_async
+
+    writer_conn = _FakeWriterConn(fail_on_write=True)
+    try:
+        _embed_rows_async(
+            _rows(4),
+            _FakeDenseProvider(),
+            dsn="fake-dsn",
+            model="fake-dense@2",
+            flush_rows=2,
+            connect=lambda dsn: writer_conn,
+        )
+        raised = False
+    except RuntimeError as exc:
+        raised = "db write exploded" in str(exc)
+    assert raised
+    assert writer_conn.closed
