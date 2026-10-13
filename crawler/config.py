@@ -11,6 +11,23 @@ from crawler.pexels_v3 import PEXELS_PUBLIC_SECRET
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _load_env_file(path: Path = REPO_ROOT / ".env") -> None:
+    """Load KEY=VALUE lines from .env into os.environ (existing vars win).
+
+    The Makefile already treats .env as the machine-local config surface;
+    this makes plain `vpc` invocations (embed/search/bench-adjacent) see the
+    same VPC_EMBED_*/VPC_JUDGE_* values the bench subcommands load.
+    """
+    if not path.exists():
+        return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+
+
 @dataclass(frozen=True)
 class Settings:
     """Resolved settings for one CLI invocation."""
@@ -27,6 +44,7 @@ def load_settings() -> Settings:
     """Read settings from VPC_* environment variables (sane local defaults)."""
     from store.db import DEFAULT_DSN
 
+    _load_env_file()
     return Settings(
         db_dsn=os.environ.get("VPC_DB_DSN", DEFAULT_DSN),
         spool_dir=Path(os.environ.get("VPC_SPOOL_DIR", REPO_ROOT / "storage" / "spool")),

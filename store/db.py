@@ -131,43 +131,86 @@ def upsert_catalog_queries(conn: psycopg.Connection, rows: Iterable[tuple[str, s
     return len(batch)
 
 
-_EMBED_SELECT_SQL = """
-SELECT pexels_id, title, description, tags
-FROM stock_videos
-WHERE embedding_model IS DISTINCT FROM %s
-  AND (
-      COALESCE(title, '') <> ''
-      OR COALESCE(description, '') <> ''
-      OR cardinality(tags) > 0
-  )
-ORDER BY pexels_id
-LIMIT %s
-"""
+_EMBED_TEXT_FILTER_SQL = """(
+    btrim(COALESCE(title, '')) <> ''
+    OR btrim(COALESCE(description, '')) <> ''
+    OR cardinality(tags) > 0
+)"""
 
 _EMBED_UPDATE_SQL = """
 UPDATE stock_videos SET
     embed_text = %s,
-    embedding = %s::vector,
-    embedding_model = %s,
-    embedded_at = NOW(),
-    sparse_embedding = %s::sparsevec,
-    sparse_model = %s
+    embedding = COALESCE(%s::vector, embedding),
+    embedding_model = COALESCE(%s, embedding_model),
+    sparse_embedding = COALESCE(%s::sparsevec, sparse_embedding),
+    sparse_model = COALESCE(%s, sparse_model),
+    embedded_at = NOW()
 WHERE pexels_id = %s
 """
 
 
-def embed_pending(conn: psycopg.Connection, provider: Any, limit: int = 1000) -> dict[str, Any]:
-    """Backfill embedding columns for rows not yet embedded with `provider`.
+def embed_select_sql(
+    dense: bool, sparse: bool, shard: int | None = None, shards: int = 3
+) -> tuple[str, list[str]]:
+    """(sql, param_names) for the rows a provider still owes vectors for.
 
-    Vectors travel as pgvector text literals cast in SQL, so no extra database
-    adapter dependency is required. Rows with empty canonical text are excluded
-    by the selection filter, so they are never re-selected.
+    Selection follows the provider's modalities: a dense-only provider tracks
+    `embedding_model`, a sparse-only one tracks `sparse_model`, so the two
+    production backfills never re-select (or clobber) each other. `shard`
+    restricts to `pexels_id % shards == shard` for incremental index builds.
     """
-    from store.embedding import build_embed_text, to_sparsevec_literal, to_vector_literal
+    owed: list[str] = []
+    params: list[str] = []
+    if dense:
+        owed.append("embedding_model IS DISTINCT FROM %s")
+        params.append("model")
+    if sparse:
+        owed.append("sparse_model IS DISTINCT FROM %s")
+        params.append("model")
+    if not owed:
+        raise ValueError("provider supports neither dense_text nor sparse_text")
+    sql = f"""
+SELECT pexels_id, title, description, tags
+FROM stock_videos
+WHERE ({" OR ".join(owed)})
+  AND {_EMBED_TEXT_FILTER_SQL}"""
+    if shard is not None:
+        if shards < 1:
+            raise ValueError("shards must be positive")
+        if not 0 <= shard < shards:
+            raise ValueError(f"shard {shard} out of range 0..{shards - 1}")
+        # mod() instead of %: psycopg would treat a literal '%' as a placeholder.
+        sql += f"\n  AND mod(pexels_id, {shards}) = {shard}"
+    sql += "\nORDER BY pexels_id\nLIMIT %s"
+    params.append("limit")
+    return sql, params
 
-    rows = conn.execute(_EMBED_SELECT_SQL, (provider.spec.model_id, limit)).fetchall()
-    if not rows:
-        return {"embedded": 0, "model": provider.spec.model_id}
+
+def _embed_row_params(
+    row: Any,
+    text: str,
+    vector: list[float] | None,
+    weights: dict[int, float] | None,
+    model: str,
+    dense_ok: bool,
+    sparse_ok: bool,
+) -> tuple:
+    """Bound parameters for one _EMBED_UPDATE_SQL row write."""
+    from store.embedding import to_sparsevec_literal, to_vector_literal
+
+    return (
+        text,
+        to_vector_literal(vector) if vector is not None else None,
+        model if dense_ok else None,
+        to_sparsevec_literal(weights) if weights else None,
+        model if sparse_ok else None,
+        row[0],
+    )
+
+
+def _embed_rows_legacy(rows: list[Any], provider: Any, conn: psycopg.Connection, model: str) -> int:
+    """Original write path: per-row execute on the caller's connection."""
+    from store.embedding import build_embed_text
 
     dense_ok = "dense_text" in provider.spec.supports
     sparse_ok = "sparse_text" in provider.spec.supports
@@ -179,24 +222,156 @@ def embed_pending(conn: psycopg.Connection, provider: Any, limit: int = 1000) ->
             build_embed_text({"title": row[1], "description": row[2], "tags": row[3]})
             for row in chunk
         ]
-        dense = provider.dense_text(texts) if dense_ok else [None] * len(chunk)
-        sparse = provider.sparse_text(texts) if sparse_ok else [None] * len(chunk)
+        live = [index for index, text in enumerate(texts) if text]
+        dense: list[Any] = [None] * len(chunk)
+        sparse: list[Any] = [None] * len(chunk)
+        if dense_ok and live:
+            vectors = provider.dense_text([texts[index] for index in live])
+            for index, vector in zip(live, vectors, strict=True):
+                dense[index] = vector
+        if sparse_ok and live:
+            weights = provider.sparse_text([texts[index] for index in live])
+            for index, weight in zip(live, weights, strict=True):
+                sparse[index] = weight
         with conn.cursor() as cur:
             for row, text, vector, weights in zip(chunk, texts, dense, sparse, strict=True):
                 cur.execute(
                     _EMBED_UPDATE_SQL,
-                    (
-                        text,
-                        to_vector_literal(vector) if vector is not None else None,
-                        provider.spec.model_id if vector is not None else None,
-                        to_sparsevec_literal(weights) if weights else None,
-                        provider.spec.model_id if weights else None,
-                        row[0],
-                    ),
+                    _embed_row_params(row, text, vector, weights, model, dense_ok, sparse_ok),
                 )
         conn.commit()
         embedded += len(chunk)
-    return {"embedded": embedded, "model": provider.spec.model_id}
+    return embedded
+
+
+def _embed_rows_async(
+    rows: list[Any],
+    provider: Any,
+    dsn: str,
+    model: str,
+    flush_rows: int = 1000,
+    queue_depth: int = 2,
+    connect: Any = None,
+) -> int:
+    """Batched write path: executemany on a background connection.
+
+    The embedding API (the slow part) runs in the calling thread while a
+    writer thread drains buffers of `flush_rows` parameter tuples via
+    executemany on its own connection, so DB writes hide behind API latency.
+    The writer session disables synchronous_commit (a crash loses at most the
+    un-committed buffers; the selection predicate re-picks those rows) and
+    turns on wal_compression to shrink full-page WAL images.
+    """
+    import queue as _queue
+    import threading
+
+    from store.embedding import build_embed_text
+
+    connect = connect or psycopg.connect
+    dense_ok = "dense_text" in provider.spec.supports
+    sparse_ok = "sparse_text" in provider.spec.supports
+    writer_conn = connect(dsn)
+    writer_conn.execute("SET synchronous_commit = off")
+    writer_conn.execute("SET wal_compression = on")
+    buffers: _queue.Queue = _queue.Queue(maxsize=queue_depth)
+    errors: list[BaseException] = []
+
+    def writer() -> None:
+        while True:
+            item = buffers.get()
+            if item is None:
+                return
+            if errors:
+                continue  # keep draining so the producer never deadlocks
+            try:
+                with writer_conn.cursor() as cur:
+                    cur.executemany(_EMBED_UPDATE_SQL, item)
+                writer_conn.commit()
+            except BaseException as exc:  # surfaced by the producer below
+                errors.append(exc)
+
+    thread = threading.Thread(target=writer, daemon=True)
+    thread.start()
+
+    step = max(1, provider.spec.max_batch)
+    pending: list[tuple] = []
+    embedded = 0
+    try:
+        for start in range(0, len(rows), step):
+            chunk = rows[start : start + step]
+            texts = [
+                build_embed_text({"title": row[1], "description": row[2], "tags": row[3]})
+                for row in chunk
+            ]
+            live = [index for index, text in enumerate(texts) if text]
+            dense: list[Any] = [None] * len(chunk)
+            sparse: list[Any] = [None] * len(chunk)
+            if dense_ok and live:
+                vectors = provider.dense_text([texts[index] for index in live])
+                for index, vector in zip(live, vectors, strict=True):
+                    dense[index] = vector
+            if sparse_ok and live:
+                weights = provider.sparse_text([texts[index] for index in live])
+                for index, weight in zip(live, weights, strict=True):
+                    sparse[index] = weight
+            for row, text, vector, weights in zip(chunk, texts, dense, sparse, strict=True):
+                pending.append(
+                    _embed_row_params(row, text, vector, weights, model, dense_ok, sparse_ok)
+                )
+            if len(pending) >= flush_rows:
+                buffers.put(pending[:flush_rows])
+                pending = pending[flush_rows:]
+                if errors:
+                    raise errors[0]
+            embedded += len(chunk)
+        if pending:
+            buffers.put(pending)
+        buffers.put(None)
+        thread.join(timeout=600)
+        if errors:
+            raise errors[0]
+    finally:
+        buffers.put(None)  # release the writer even on failure
+        thread.join(timeout=60)
+        writer_conn.close()
+    return embedded
+
+
+def embed_pending(
+    conn: psycopg.Connection,
+    provider: Any,
+    limit: int = 1000,
+    shard: int | None = None,
+    shards: int = 3,
+    write: str = "legacy",
+    dsn: str | None = None,
+) -> dict[str, Any]:
+    """Backfill embedding columns for rows not yet embedded with `provider`.
+
+    `write="legacy"` keeps the original per-row path (A/B baseline);
+    `write="async"` batches executemany writes on a background connection so
+    DB work hides behind embedding API latency (`dsn` required). Both paths
+    are resumable: un-committed rows simply get re-selected on the next run.
+    """
+    from store.embedding import build_embed_text  # noqa: F401  (kept for callers)
+
+    dense_ok = "dense_text" in provider.spec.supports
+    sparse_ok = "sparse_text" in provider.spec.supports
+    sql, _params = embed_select_sql(dense_ok, sparse_ok, shard=shard, shards=shards)
+    model = provider.spec.model_id
+
+    model_params = [model] * (int(dense_ok) + int(sparse_ok))
+    rows = conn.execute(sql, (*model_params, limit)).fetchall()
+    if not rows:
+        return {"embedded": 0, "model": model}
+
+    if write == "async":
+        if not dsn:
+            raise ValueError("write=async needs dsn for the writer connection")
+        embedded = _embed_rows_async(rows, provider, dsn, model)
+    else:
+        embedded = _embed_rows_legacy(rows, provider, conn, model)
+    return {"embedded": embedded, "model": model}
 
 
 _CATALOG_GAP_ORDER = {

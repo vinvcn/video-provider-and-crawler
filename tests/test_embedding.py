@@ -78,6 +78,6 @@ def test_sparsevec_literal_is_sorted_with_dimension():
 def test_get_provider_registry():
     provider = get_provider("hash")
     assert provider.spec.model_id.startswith("local-hash")
-    assert provider.spec.dim == 768  # matches the vector(768) column (migration 003)
+    assert provider.spec.dim == 1024  # matches the vector(1024) column (migration 006)
     with pytest.raises(ValueError):
         get_provider("does-not-exist")
