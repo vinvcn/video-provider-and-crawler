@@ -144,6 +144,7 @@ class SearchHit(BaseModel):
     video_files: list[dict[str, Any]] = Field(
         ..., description="Every rendition: link, quality, width/height, fps."
     )
+    creator: str | None = Field(None, description="Uploader/creator name when known.")
     vector1024: list[float] | None = Field(
         None, description="Row embedding for the caller's dedup gate."
     )

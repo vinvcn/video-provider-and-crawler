@@ -194,7 +194,8 @@ def search_library(
             rows = conn.execute(
                 f"""
                 SELECT pexels_id, slug, title, duration, width, height, fps,
-                       orientation, thumbnail_path, thumbnail_url, video_files
+                       orientation, thumbnail_path, thumbnail_url, video_files,
+                       user_name
                        {vector_select}
                 FROM stock_videos WHERE pexels_id = ANY(%s)
                 """,
@@ -218,11 +219,12 @@ def search_library(
                     "thumbnail_path": row[8],
                     "thumbnail_url": row[9],
                     "video_files": row[10],
+                    "creator": row[11],
                 }
                 if include_vector:
                     # psycopg returns the unregistered `vector` type as its
                     # "[a,b,...]" literal text; parse it without a new dep.
-                    raw = row[11]
+                    raw = row[12]
                     if isinstance(raw, str):
                         hit["vector1024"] = [float(x) for x in raw.strip("[]").split(",")]
                     else:
