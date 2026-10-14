@@ -1,0 +1,17 @@
+# 构建上下文瘦身与密钥隔离。
+# storage/ 是 68GB 缩略图与运行数据；.env 是机器本地密钥——都不进镜像。
+storage/
+.env
+.env.*
+.git/
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+tests/
+docs/
+scripts/
+airflow/
+uv.lock
