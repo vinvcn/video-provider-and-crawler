@@ -258,8 +258,10 @@ def test_openapi_schema_and_docs_page():
     assert client.get("/docs").status_code == 200
 
     spec = client.get("/openapi.json").json()
-    assert set(spec["paths"]) == {"/search", "/healthz"}
+    assert set(spec["paths"]) == {"/search", "/healthz", "/embed", "/thumbnail/{pexels_id}"}
     assert spec["paths"]["/search"]["post"]["tags"] == ["search"]
+    assert spec["paths"]["/embed"]["post"]["tags"] == ["embed"]
+    assert spec["paths"]["/thumbnail/{pexels_id}"]["get"]["tags"] == ["thumbnail"]
 
     schemas = spec["components"]["schemas"]
     hit = schemas["SearchHit"]["properties"]

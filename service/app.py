@@ -24,11 +24,13 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+import httpx
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from crawler.config import REPO_ROOT, load_settings
-from store import db
+from store import db, image_embeddings
 from store.embedding import SPARSE_DIM
 from store.search import resolve_query, search_library
 
@@ -176,6 +178,33 @@ class HealthStatus(BaseModel):
     sparse: int
 
 
+class EmbedRequest(BaseModel):
+    """One library image; the service resolves the file, the caller sends no bytes."""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {"asset_id": "8775004"},
+            ]
+        }
+    )
+
+    asset_id: str = Field(
+        ...,
+        min_length=1,
+        description="Pexels id of the library row; its thumbnail identifies the image.",
+    )
+
+
+class EmbedResponse(BaseModel):
+    key: str = Field(..., description="Image identity, pexels:<id>.")
+    model: str = Field(..., description="Embedding model that produced the vector.")
+    dim: int = Field(..., description="Vector dimension.")
+    vector: list[float] = Field(..., description="Image vector for the dedup gate.")
+    cached: bool = Field(..., description="True when the persisted row answered, no embed ran.")
+    image: str = Field(..., description="Image source used on a miss: local | cdn | none.")
+
+
 def _log_query(request: SearchRequest, result: dict[str, Any]) -> None:
     """Append one JSONL line per lookup; logging never fails a search.
 
@@ -249,3 +278,41 @@ def search(request: SearchRequest) -> dict[str, Any]:
     )
     _log_query(request, result)
     return result
+
+
+@app.post(
+    "/embed",
+    response_model=EmbedResponse,
+    tags=["embed"],
+    summary="Lazy persisted image vector for the dedup gate",
+)
+def embed(request: EmbedRequest) -> dict[str, Any]:
+    """Vector for one library image, cache-first.
+
+    A hit answers from `image_embeddings` with no file read and no provider
+    call. A miss reads the local thumbnail (CDN fallback), embeds it through
+    the configured provider and persists the vector. Errors answer 4xx/5xx so
+    the caller can fail open.
+    """
+    if not request.asset_id.isdigit():
+        raise HTTPException(status_code=400, detail="asset_id must be the numeric pexels id")
+    try:
+        return image_embeddings.get_or_embed(int(request.asset_id))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (httpx.HTTPError, ValueError, RuntimeError) as exc:
+        logger.warning("embed failed: asset_id=%s error=%s", request.asset_id, type(exc).__name__)
+        raise HTTPException(status_code=502, detail="image embedding provider failed") from exc
+
+
+@app.get(
+    "/thumbnail/{pexels_id}",
+    tags=["thumbnail"],
+    summary="Serve the local thumbnail file",
+)
+def thumbnail(pexels_id: int) -> FileResponse:
+    """JPEG bytes from the mounted thumbnail dir; 404 lets the caller fall back to the CDN."""
+    path = image_embeddings.thumbnail_path(pexels_id)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"thumbnail not on disk: pexels {pexels_id}")
+    return FileResponse(path, media_type="image/jpeg")
