@@ -149,6 +149,21 @@ class HashEmbeddingProvider:
         raise NotImplementedError("hash provider is text-only")
 
 
+def parse_vector_literal(raw: Any) -> list[float] | None:
+    """Parse a pgvector text literal (``[0.1,0.2,...]``) or a list into floats.
+
+    psycopg returns the ``vector`` column as text without the pgvector package
+    installed; rows hydrated through this repo must parse both shapes. None
+    and empty text both map to None (missing vector), never to [].
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        text = raw.strip("[]")
+        return [float(value) for value in text.split(",")] if text else None
+    return list(raw)
+
+
 def to_vector_literal(values: Sequence[float]) -> str:
     """pgvector text literal for a dense vector: `[0.1,0.2,...]`."""
     return "[" + ",".join(f"{value:.6g}" for value in values) + "]"

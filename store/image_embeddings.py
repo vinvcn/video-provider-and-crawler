@@ -21,6 +21,7 @@ Environment (injected by compose ``env_file``, machine-local ``.env``):
 - ``VPC_IMAGE_EMBED_TIMEOUT``    seconds, default 30 (provider AND CDN fetch)
 - ``VPC_THUMBNAIL_DIR``          local thumbnail dir (``load_settings`` owns it)
 - ``VPC_USE_PROXY``              0 forces direct connections (AGENTS.md §3)
+- ``VPC_LOG_LEVEL``              service-side stdlib log level, default INFO
 """
 
 from __future__ import annotations
@@ -39,7 +40,7 @@ import psycopg
 
 from crawler.config import load_settings
 from store import db
-from store.embedding import to_vector_literal
+from store.embedding import parse_vector_literal, to_vector_literal
 
 logger = logging.getLogger("vpc.image_embeddings")
 
@@ -87,23 +88,13 @@ def thumbnail_path(pexels_id: int) -> Path:
     return load_settings().thumbnail_dir / f"{int(pexels_id)}.jpg"
 
 
-def _as_vector(raw: Any) -> list[float] | None:
-    """pgvector rows arrive as text or list; parse without new dependencies."""
-    if raw is None:
-        return None
-    if isinstance(raw, str):
-        text = raw.strip("[]")
-        return [float(value) for value in text.split(",")] if text else None
-    return list(raw)
-
-
 def lookup(conn: psycopg.Connection, key: str, model: str) -> list[float] | None:
     """Vector for (key, model) or None; a hit never touches the file."""
     row = conn.execute(
         "SELECT embedding FROM image_embeddings WHERE key = %s AND model = %s",
         (key, model),
     ).fetchone()
-    return _as_vector(row[0]) if row is not None else None
+    return parse_vector_literal(row[0]) if row is not None else None
 
 
 def upsert(conn: psycopg.Connection, key: str, model: str, vector: list[float]) -> None:
@@ -223,12 +214,13 @@ def get_or_embed(pexels_id: int) -> dict[str, Any]:
     """Lazy vector for one pexels id.
 
     Cache hit: one DB lookup, no file read, no provider call. Miss: single
-    flight, local-first image read, one DashScope embed, upsert. Both paths log
-    one usage line (cached, image source, tokens, latency) for the A/B cost
-    axis.
+    flight, local-first image read, one DashScope embed, upsert. Every path —
+    including the race-loser that finds the row inside the lock — logs one
+    usage line (cached, image source, tokens, latency) for the A/B cost axis.
     """
     key = pexels_key(pexels_id)
     settings = embed_settings()
+    started = time.monotonic()
     conn = db.connect()
     try:
         vector = lookup(conn, key, settings.model)
@@ -237,7 +229,7 @@ def get_or_embed(pexels_id: int) -> dict[str, Any]:
                 "image embed hit: key=%s model=%s image=none latency_ms=%.1f",
                 key,
                 settings.model,
-                0.0,
+                (time.monotonic() - started) * 1000,
             )
             return _payload(key, settings.model, vector, cached=True, image="none")
     finally:
@@ -248,10 +240,15 @@ def get_or_embed(pexels_id: int) -> dict[str, Any]:
             conn = db.connect()
             try:
                 vector = lookup(conn, key, settings.model)
-                if vector is not None:  # another funnel won the race
+                if vector is not None:  # another funnel won the race — also a hit
+                    logger.info(
+                        "image embed hit: key=%s model=%s image=none latency_ms=%.1f",
+                        key,
+                        settings.model,
+                        (time.monotonic() - started) * 1000,
+                    )
                     return _payload(key, settings.model, vector, cached=True, image="none")
                 payload, source = image_bytes(conn, pexels_id)
-                started = time.monotonic()
                 vector, usage = embed_image(payload, settings)
                 upsert(conn, key, settings.model, vector)
             finally:

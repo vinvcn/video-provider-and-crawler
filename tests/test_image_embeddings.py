@@ -72,6 +72,7 @@ class _FakeConn:
 def settings(monkeypatch):
     monkeypatch.setenv("VPC_IMAGE_EMBED_MODEL", "test-model")
     monkeypatch.setenv("VPC_IMAGE_EMBED_API_KEY", "test-key")
+    monkeypatch.setenv("VPC_IMAGE_EMBED_TIMEOUT", "30")
     monkeypatch.setenv("VPC_USE_PROXY", "0")
     return image_embeddings.embed_settings()
 
@@ -132,7 +133,7 @@ def test_miss_embeds_local_file_once(monkeypatch, tmp_path, caplog, settings):
     assert any("image embed miss" in record.message for record in caplog.records)
 
 
-def test_second_lookup_wins_after_the_race(monkeypatch, settings):
+def test_second_lookup_wins_after_the_race(monkeypatch, caplog, settings):
     first = _FakeConn()  # the lookup outside the lock misses
     second = _FakeConn(hits={image_embeddings.pexels_key(7): VEC})  # row appeared meanwhile
     conns = [first, second]
@@ -144,11 +145,14 @@ def test_second_lookup_wins_after_the_race(monkeypatch, settings):
         lambda payload, settings: embeds.append(payload) or (VEC, {}),
     )
 
-    result = image_embeddings.get_or_embed(7)
+    with caplog.at_level(logging.INFO, logger="vpc.image_embeddings"):
+        result = image_embeddings.get_or_embed(7)
 
     assert result["cached"] is True
     assert result["vector"] == VEC
     assert embeds == []  # the loser never embeds
+    # 竞态落败者也是一次命中：同样落一行用量日志（A/B 命中率不能少计）。
+    assert any("image embed hit" in record.message for record in caplog.records)
 
 
 def test_concurrent_same_key_embeds_once(monkeypatch, settings):

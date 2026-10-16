@@ -9,7 +9,7 @@ funnel (coarse rank -> precise rank -> VLM walk -> dedup gate) needs.
 Self-documenting: FastAPI serves the OpenAPI schema at /openapi.json with
 Swagger UI at /docs and ReDoc at /redoc.
 
-Fail-open is the *caller's* contract: errors leave as 4xx/5xx (400 bad request,
+Fail-open is the *caller's* contract: errors leave as 4xx/5xx (422 validation,
 404 missing image, 502 provider failure) so the consumer can degrade; it never
 hangs. `GET /healthz` reports index coverage for readiness probes.
 """
@@ -35,14 +35,15 @@ from store.search import resolve_query, search_library
 
 logger = logging.getLogger("vpc.retrieval")
 
+load_settings()  # .env -> environ once, before any provider/DSN read
+
 # uvicorn 只给自己的 logger 配 handler，stdlib INFO 默认不可见——没有这一行，
-# vpc.* 的用量日志（A/B 成本轴的数据源）会整体静默。basicConfig 幂等。
+# vpc.* 的用量日志（A/B 成本轴的数据源）会整体静默。必须在 load_settings()
+# 之后：VPC_LOG_LEVEL 可以只写在机器本地 .env 里。
 logging.basicConfig(
     level=os.environ.get("VPC_LOG_LEVEL", "INFO"),
     format="%(levelname)s %(name)s %(message)s",
 )
-
-load_settings()  # .env -> environ once, before any provider/DSN read
 
 
 def _warm_indexes() -> None:
