@@ -9,8 +9,8 @@ funnel (coarse rank -> precise rank -> VLM walk -> dedup gate) needs.
 Self-documenting: FastAPI serves the OpenAPI schema at /openapi.json with
 Swagger UI at /docs and ReDoc at /redoc.
 
-Fail-open is the *caller's* contract: this service answers errors with a
-plain 5xx so the consumer can degrade to its default video source; it never
+Fail-open is the *caller's* contract: errors leave as 4xx/5xx (400 bad request,
+404 missing image, 502 provider failure) so the consumer can degrade; it never
 hangs. `GET /healthz` reports index coverage for readiness probes.
 """
 
@@ -24,7 +24,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -35,6 +34,13 @@ from store.embedding import SPARSE_DIM
 from store.search import resolve_query, search_library
 
 logger = logging.getLogger("vpc.retrieval")
+
+# uvicorn 只给自己的 logger 配 handler，stdlib INFO 默认不可见——没有这一行，
+# vpc.* 的用量日志（A/B 成本轴的数据源）会整体静默。basicConfig 幂等。
+logging.basicConfig(
+    level=os.environ.get("VPC_LOG_LEVEL", "INFO"),
+    format="%(levelname)s %(name)s %(message)s",
+)
 
 load_settings()  # .env -> environ once, before any provider/DSN read
 
@@ -184,19 +190,21 @@ class EmbedRequest(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
             "examples": [
-                {"asset_id": "8775004"},
+                {"asset_id": 8775004},
             ]
         }
     )
 
-    asset_id: str = Field(
+    asset_id: int = Field(
         ...,
-        min_length=1,
+        ge=1,
         description="Pexels id of the library row; its thumbnail identifies the image.",
     )
 
 
 class EmbedResponse(BaseModel):
+    """Vector for one library image, plus where it came from."""
+
     key: str = Field(..., description="Image identity, pexels:<id>.")
     model: str = Field(..., description="Embedding model that produced the vector.")
     dim: int = Field(..., description="Vector dimension.")
@@ -291,16 +299,17 @@ def embed(request: EmbedRequest) -> dict[str, Any]:
 
     A hit answers from `image_embeddings` with no file read and no provider
     call. A miss reads the local thumbnail (CDN fallback), embeds it through
-    the configured provider and persists the vector. Errors answer 4xx/5xx so
-    the caller can fail open.
+    the configured provider and persists the vector. Errors map to 4xx/5xx so
+    the caller can fail open; any unexpected failure becomes 502 rather than
+    an unhandled traceback, keeping the fail-open contract unconditional.
     """
-    if not request.asset_id.isdigit():
-        raise HTTPException(status_code=400, detail="asset_id must be the numeric pexels id")
     try:
-        return image_embeddings.get_or_embed(int(request.asset_id))
+        return image_embeddings.get_or_embed(request.asset_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except (httpx.HTTPError, ValueError, RuntimeError) as exc:
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — the contract is unconditional 5xx
         logger.warning("embed failed: asset_id=%s error=%s", request.asset_id, type(exc).__name__)
         raise HTTPException(status_code=502, detail="image embedding provider failed") from exc
 
