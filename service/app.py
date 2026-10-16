@@ -9,8 +9,8 @@ funnel (coarse rank -> precise rank -> VLM walk -> dedup gate) needs.
 Self-documenting: FastAPI serves the OpenAPI schema at /openapi.json with
 Swagger UI at /docs and ReDoc at /redoc.
 
-Fail-open is the *caller's* contract: this service answers errors with a
-plain 5xx so the consumer can degrade to its default video source; it never
+Fail-open is the *caller's* contract: errors leave as 4xx/5xx (422 validation,
+404 missing image, 502 provider failure) so the consumer can degrade; it never
 hangs. `GET /healthz` reports index coverage for readiness probes.
 """
 
@@ -24,17 +24,26 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from crawler.config import REPO_ROOT, load_settings
-from store import db
+from store import db, image_embeddings
 from store.embedding import SPARSE_DIM
 from store.search import resolve_query, search_library
 
 logger = logging.getLogger("vpc.retrieval")
 
 load_settings()  # .env -> environ once, before any provider/DSN read
+
+# uvicorn 只给自己的 logger 配 handler，stdlib INFO 默认不可见——没有这一行，
+# vpc.* 的用量日志（A/B 成本轴的数据源）会整体静默。必须在 load_settings()
+# 之后：VPC_LOG_LEVEL 可以只写在机器本地 .env 里。
+logging.basicConfig(
+    level=os.environ.get("VPC_LOG_LEVEL", "INFO"),
+    format="%(levelname)s %(name)s %(message)s",
+)
 
 
 def _warm_indexes() -> None:
@@ -176,6 +185,35 @@ class HealthStatus(BaseModel):
     sparse: int
 
 
+class EmbedRequest(BaseModel):
+    """One library image; the service resolves the file, the caller sends no bytes."""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {"asset_id": 8775004},
+            ]
+        }
+    )
+
+    asset_id: int = Field(
+        ...,
+        ge=1,
+        description="Pexels id of the library row; its thumbnail identifies the image.",
+    )
+
+
+class EmbedResponse(BaseModel):
+    """Vector for one library image, plus where it came from."""
+
+    key: str = Field(..., description="Image identity, pexels:<id>.")
+    model: str = Field(..., description="Embedding model that produced the vector.")
+    dim: int = Field(..., description="Vector dimension.")
+    vector: list[float] = Field(..., description="Image vector for the dedup gate.")
+    cached: bool = Field(..., description="True when the persisted row answered, no embed ran.")
+    image: str = Field(..., description="Image source used on a miss: local | cdn | none.")
+
+
 def _log_query(request: SearchRequest, result: dict[str, Any]) -> None:
     """Append one JSONL line per lookup; logging never fails a search.
 
@@ -249,3 +287,42 @@ def search(request: SearchRequest) -> dict[str, Any]:
     )
     _log_query(request, result)
     return result
+
+
+@app.post(
+    "/embed",
+    response_model=EmbedResponse,
+    tags=["embed"],
+    summary="Lazy persisted image vector for the dedup gate",
+)
+def embed(request: EmbedRequest) -> dict[str, Any]:
+    """Vector for one library image, cache-first.
+
+    A hit answers from `image_embeddings` with no file read and no provider
+    call. A miss reads the local thumbnail (CDN fallback), embeds it through
+    the configured provider and persists the vector. Errors map to 4xx/5xx so
+    the caller can fail open; any unexpected failure becomes 502 rather than
+    an unhandled traceback, keeping the fail-open contract unconditional.
+    """
+    try:
+        return image_embeddings.get_or_embed(request.asset_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — the contract is unconditional 5xx
+        logger.warning("embed failed: asset_id=%s error=%s", request.asset_id, type(exc).__name__)
+        raise HTTPException(status_code=502, detail="image embedding provider failed") from exc
+
+
+@app.get(
+    "/thumbnail/{pexels_id}",
+    tags=["thumbnail"],
+    summary="Serve the local thumbnail file",
+)
+def thumbnail(pexels_id: int) -> FileResponse:
+    """JPEG bytes from the mounted thumbnail dir; 404 lets the caller fall back to the CDN."""
+    path = image_embeddings.thumbnail_path(pexels_id)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"thumbnail not on disk: pexels {pexels_id}")
+    return FileResponse(path, media_type="image/jpeg")
